@@ -58,7 +58,8 @@ RIGHT_CMD_KEYCODE = 54
 DOUBLE_TAP_WINDOW = 0.4
 V_KEYCODE = 9
 
-WHISPER_PROMPT = "Hola, buenos días."
+# No sentence prompt — only vocabulary hints to avoid hallucination on long audio
+WHISPER_PROMPT = None
 
 # Transcription modes
 MODE_AUTO = "Auto"
@@ -182,9 +183,10 @@ def transcribe_cloud(audio_data: np.ndarray, language: str | None = "es") -> str
         params = dict(
             model="whisper-large-v3",
             file=("audio.wav", buf),
-            prompt=WHISPER_PROMPT,
             response_format="text",
         )
+        if WHISPER_PROMPT:
+            params["prompt"] = WHISPER_PROMPT
         if language:
             params["language"] = language
         result = client.audio.transcriptions.create(**params)
@@ -222,9 +224,10 @@ def transcribe_local(audio_data: np.ndarray, language: str | None = "es") -> str
             "-f", wav_path,
             "-otxt", "-of", out_base, "--no-timestamps",
             "--beam-size", "8",
-            "--prompt", WHISPER_PROMPT,
             "--entropy-thold", "2.4",
         ]
+        if WHISPER_PROMPT:
+            cmd.extend(["--prompt", WHISPER_PROMPT])
         if language:
             cmd.extend(["-l", language])
 
@@ -305,6 +308,42 @@ usage_tracker = UsageTracker()
 
 
 # --- Smart transcription router ---
+
+MAX_CHUNK_SECONDS = 55  # Whisper degrades past ~60s, chunk at 55 with overlap
+CHUNK_OVERLAP_SECONDS = 2  # overlap to avoid cutting words
+
+
+def transcribe_chunked(audio_data: np.ndarray, mode: str, language: str | None = "es") -> tuple[str | None, str]:
+    """Split long audio into chunks, transcribe each, concatenate."""
+    chunk_size = MAX_CHUNK_SECONDS * SAMPLE_RATE
+    overlap = CHUNK_OVERLAP_SECONDS * SAMPLE_RATE
+    results = []
+    engine_used = "none"
+    start = 0
+
+    total_chunks = max(1, int(np.ceil(len(audio_data) / (chunk_size - overlap))))
+    logger.info(f"Chunking: {total_chunks} segments of ~{MAX_CHUNK_SECONDS}s")
+
+    while start < len(audio_data):
+        end = min(start + chunk_size, len(audio_data))
+        chunk = audio_data[start:end]
+
+        # Skip near-silent chunks
+        rms = np.sqrt(np.mean(chunk ** 2))
+        if rms < 0.001:
+            start += chunk_size - overlap
+            continue
+
+        text, engine = transcribe_audio(chunk, mode, language=language)
+        engine_used = engine
+        if text:
+            results.append(text.strip())
+        start += chunk_size - overlap
+
+    if results:
+        return " ".join(results), engine_used
+    return None, engine_used
+
 
 def transcribe_audio(audio_data: np.ndarray, mode: str, language: str | None = "es") -> tuple[str | None, str]:
     """Route transcription based on mode. Returns (text, engine_used)."""
@@ -518,7 +557,10 @@ class AutoWhisperApp(rumps.App):
                 return
 
             lang_code = LANG_MAP.get(self._language, "es")
-            text, engine = transcribe_audio(audio, self._mode, language=lang_code)
+            if duration > MAX_CHUNK_SECONDS:
+                text, engine = transcribe_chunked(audio, self._mode, language=lang_code)
+            else:
+                text, engine = transcribe_audio(audio, self._mode, language=lang_code)
             if text:
                 logger.info(f"[{engine}] Transcribed: {text[:80]}...")
                 self._last_transcription = text
