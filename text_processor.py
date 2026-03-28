@@ -13,8 +13,12 @@ logger = logging.getLogger(__name__)
 PROMPT_SUMMARIZE = """Eres un asistente ejecutivo. Comunica la esencia de este texto como lo haría \
 un profesional en una conversación breve. Prioriza: decisiones, acciones \
 requeridas, y conclusiones. Omite contexto obvio y relleno.
-Datos concretos (cifras, fechas, nombres, URLs): márcalos con [DATA]...[/DATA].
-Habla en español, directo. No uses muletillas como "en resumen" o "básicamente".
+
+Reglas de formato:
+- Datos concretos (cifras, fechas, nombres, URLs): márcalos con [DATA]...[/DATA]
+- Palabras o frases clave que requieren énfasis: márcalas con [E]...[/E]
+- Agrega [P] donde corresponda una pausa natural (cambio de tema, antes de algo importante)
+- Habla en español, directo. No uses muletillas como "en resumen" o "básicamente"
 
 TEXTO:
 {text}"""
@@ -22,8 +26,12 @@ TEXTO:
 PROMPT_EXPLAIN = """Explica este texto como un colega senior que domina el tema. Identifica \
 la idea central, por qué importa, y qué implica. Si hay jerga técnica, \
 tradúcela a lenguaje claro sin perder precisión.
-Datos concretos: márcalos con [DATA]...[/DATA].
-Habla en español, claro y directo.
+
+Reglas de formato:
+- Datos concretos: márcalos con [DATA]...[/DATA]
+- Palabras o frases clave: márcalas con [E]...[/E]
+- Agrega [P] donde corresponda una pausa natural
+- Habla en español, claro y directo
 
 TEXTO:
 {text}"""

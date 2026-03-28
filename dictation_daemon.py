@@ -596,14 +596,20 @@ class AutoWhisperApp(rumps.App):
                             self._last_rcmd_time = now
                     self._rcmd_was_down = rcmd_down
 
-                # Left ⌘ — summarize selection
+                # Left ⌘ — summarize selection (or stop if speaking)
                 elif kc == LEFT_CMD_KEYCODE:
                     lcmd_down = bool(flags & (1 << 3))  # NX_DEVICELCMDKEYMASK
                     if lcmd_down and not self._lcmd_was_down:
                         now = time.time()
                         if now - self._last_lcmd_time < DOUBLE_TAP_WINDOW:
-                            logger.info("Double-tap Left ⌘ → summarize")
-                            self._process_selection("summarize")
+                            from voice_agent import is_speaking, stop_speaking
+                            if is_speaking():
+                                logger.info("Double-tap Left ⌘ → stop speaking")
+                                stop_speaking()
+                                self._set_ui(self.ICON_IDLE, "Stopped")
+                            else:
+                                logger.info("Double-tap Left ⌘ → summarize")
+                                self._process_selection("summarize")
                             self._last_lcmd_time = 0
                         else:
                             self._last_lcmd_time = now

@@ -24,7 +24,11 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 BACKENDS = ("google", "edge", "macos")
-DEFAULT_BACKEND = "edge"  # start with edge until Google Cloud is configured
+DEFAULT_BACKEND = "edge"
+
+# Global playback process — allows stopping from outside
+_current_playback = None
+_playback_lock = threading.Lock()
 
 
 # --- Google Cloud TTS (WaveNet) ---
@@ -48,10 +52,10 @@ def _speak_google(text: str, output: Path, voice: str = "es-ES-Wavenet-C"):
 
 # --- Edge TTS (Microsoft Neural, free) ---
 
-def _speak_edge(text: str, output: Path, voice: str = "es-ES-ElviraNeural"):
+def _speak_edge(text: str, output: Path, voice: str = "es-ES-AlvaroNeural"):
     import edge_tts
     async def _gen():
-        comm = edge_tts.Communicate(text, voice)
+        comm = edge_tts.Communicate(text, voice, rate="+25%")
         await comm.save(str(output))
     asyncio.run(_gen())
 
@@ -72,6 +76,61 @@ def _speak_macos(text: str, output: Path, voice: str = "Mónica"):
 
 # --- Unified interface ---
 
+def _clean_for_speech(text: str) -> str:
+    """Remove markdown, symbols, and artifacts that TTS reads literally."""
+    import re
+    # Headers
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+    # Bold/italic (***text***, **text**, *text*)
+    text = re.sub(r'\*{1,3}([^*]+)\*{1,3}', r'\1', text)
+    # Underscores for italic/bold
+    text = re.sub(r'_{1,3}([^_]+)_{1,3}', r'\1', text)
+    # Strikethrough
+    text = re.sub(r'~~([^~]+)~~', r'\1', text)
+    # Bullet markers
+    text = re.sub(r'^[\s]*[-*•]\s+', '', text, flags=re.MULTILINE)
+    # Numbered lists (1. 2. etc) — keep the text
+    text = re.sub(r'^\s*\d+\.\s+', '', text, flags=re.MULTILINE)
+    # Checkboxes
+    text = re.sub(r'\[[ x]\]\s*', '', text)
+    # Inline code backticks
+    text = re.sub(r'`([^`]+)`', r'\1', text)
+    # Code blocks
+    text = re.sub(r'```[\s\S]*?```', '', text)
+    # HTML tags
+    text = re.sub(r'<[^>]+>', '', text)
+    # Markdown links [text](url) — keep text (before URL removal)
+    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
+    # URLs — replace with "enlace"
+    text = re.sub(r'https?://\S+', 'enlace', text)
+    # Emojis and special symbols
+    text = re.sub(r'[✅❓⚠️📌🔴◎◉⟳◠◈🔊→←↓↑▸►●○■□]', '', text)
+    # Horizontal rules
+    text = re.sub(r'^[-*_]{3,}\s*$', '', text, flags=re.MULTILINE)
+    # Pipe tables
+    text = re.sub(r'^\|.*\|$', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^[\s|:-]+$', '', text, flags=re.MULTILINE)
+    # Multiple spaces/newlines
+    text = re.sub(r'  +', ' ', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    # Stray asterisks or underscores
+    text = re.sub(r'(?<!\w)[*_]+|[*_]+(?!\w)', '', text)
+    return text.strip()
+
+
+def _apply_ssml_markers(text: str) -> str:
+    """Convert [E]...[/E] and [P] markers to text hints for natural speech."""
+    import re
+    # [P] → comma pause (Edge TTS respects punctuation pauses)
+    text = re.sub(r'\[P\]', ', ', text)
+    # [E]...[/E] → just keep the text (Edge TTS doesn't support inline SSML,
+    # but the emphasis words are naturally stressed in context)
+    text = re.sub(r'\[E\](.*?)\[/E\]', r'\1', text)
+    # [DATA]...[/DATA] → remove (already extracted by text_processor)
+    text = re.sub(r'\[DATA\].*?\[/DATA\]', '', text, flags=re.DOTALL)
+    return text.strip()
+
+
 def speak(text: str, backend: str = DEFAULT_BACKEND, voice: str | None = None,
           block: bool = True):
     """
@@ -81,7 +140,10 @@ def speak(text: str, backend: str = DEFAULT_BACKEND, voice: str | None = None,
     if not text or not text.strip():
         return
 
-    text = text.strip()
+    text = _clean_for_speech(text.strip())
+    # Convert inflection markers to SSML for Edge TTS
+    if backend == "edge":
+        text = _apply_ssml_markers(text)
 
     suffix = ".aiff" if backend == "macos" else ".mp3"
     tmp = Path(tempfile.mktemp(suffix=suffix))
@@ -90,7 +152,7 @@ def speak(text: str, backend: str = DEFAULT_BACKEND, voice: str | None = None,
         if backend == "google":
             _speak_google(text, tmp, voice or "es-ES-Wavenet-C")
         elif backend == "edge":
-            _speak_edge(text, tmp, voice or "es-ES-ElviraNeural")
+            _speak_edge(text, tmp, voice or "es-ES-AlvaroNeural")
         elif backend == "macos":
             _speak_macos(text, tmp, voice or "Mónica")
         else:
@@ -111,16 +173,44 @@ def speak(text: str, backend: str = DEFAULT_BACKEND, voice: str | None = None,
         logger.warning("TTS produced empty audio")
         return
 
+    global _current_playback
     cmd = ["afplay", str(tmp)]
+
+    with _playback_lock:
+        stop_speaking()  # kill any previous playback
+        proc = subprocess.Popen(cmd)
+        _current_playback = proc
+
     if block:
-        subprocess.run(cmd, timeout=300)
+        proc.wait()
+        with _playback_lock:
+            _current_playback = None
         tmp.unlink(missing_ok=True)
     else:
-        # Clean up after playback finishes
-        def _play_and_clean():
-            subprocess.run(cmd, timeout=300)
+        def _wait_and_clean():
+            proc.wait()
+            with _playback_lock:
+                global _current_playback
+                if _current_playback == proc:
+                    _current_playback = None
             tmp.unlink(missing_ok=True)
-        threading.Thread(target=_play_and_clean, daemon=True).start()
+        threading.Thread(target=_wait_and_clean, daemon=True).start()
+
+
+def stop_speaking():
+    """Stop any current playback immediately."""
+    global _current_playback
+    with _playback_lock:
+        if _current_playback and _current_playback.poll() is None:
+            _current_playback.terminate()
+            _current_playback = None
+            logger.info("Playback stopped")
+
+
+def is_speaking() -> bool:
+    """Check if TTS is currently playing."""
+    with _playback_lock:
+        return _current_playback is not None and _current_playback.poll() is None
 
 
 def speak_async(text: str, backend: str = DEFAULT_BACKEND, voice: str | None = None):
