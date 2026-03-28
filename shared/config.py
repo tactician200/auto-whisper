@@ -33,8 +33,10 @@ WHISPER_LANGUAGE = "es"
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = "gemini-2.5-flash"
 
-# Groq (cloud transcription)
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+# Groq (cloud transcription) — dual accounts for free tier maximization
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")  # legacy fallback
+GROQ_API_KEY_DICTATION = os.environ.get("GROQ_API_KEY_DICTATION", GROQ_API_KEY)
+GROQ_API_KEY_MEETINGS = os.environ.get("GROQ_API_KEY_MEETINGS", GROQ_API_KEY)
 
 # Audio
 SUPPORTED_FORMATS = {".m4a", ".mp3", ".wav", ".aac", ".webm", ".ogg", ".mp4"}
@@ -42,3 +44,6 @@ SAMPLE_RATE = 16000
 
 # Prompts
 PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
+
+# Meeting contexts (future: per-company knowledge)
+CONTEXTS_DIR = TRANSCRIPTS / "contexts"

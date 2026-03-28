@@ -39,7 +39,7 @@ from Quartz import (
 )
 from shared.config import (
     WHISPER_BIN, WHISPER_MODEL,
-    SAMPLE_RATE, LOGS, GROQ_API_KEY,
+    SAMPLE_RATE, LOGS, GROQ_API_KEY_DICTATION,
 )
 
 LOGS.mkdir(parents=True, exist_ok=True)
@@ -70,7 +70,7 @@ def _get_groq_client():
     global _groq_client
     if _groq_client is None:
         from groq import Groq
-        _groq_client = Groq(api_key=GROQ_API_KEY)
+        _groq_client = Groq(api_key=GROQ_API_KEY_DICTATION)
     return _groq_client
 
 # Transcription modes
@@ -369,7 +369,7 @@ def transcribe_audio(audio_data: np.ndarray, mode: str, language: str | None = "
         use_cloud = False
 
     if use_cloud and mode == MODE_AUTO:
-        use_cloud = GROQ_API_KEY and is_online()
+        use_cloud = GROQ_API_KEY_DICTATION and is_online()
 
     if use_cloud:
         text = transcribe_cloud(audio_data, language=language)
@@ -425,7 +425,7 @@ class AutoWhisperApp(rumps.App):
         self._last_transcription = None
 
         # Default mode
-        self._mode = MODE_CLOUD if GROQ_API_KEY else MODE_LOCAL
+        self._mode = MODE_CLOUD if GROQ_API_KEY_DICTATION else MODE_LOCAL
         self._language = LANG_ES
 
         # Engine submenu
@@ -637,12 +637,12 @@ if __name__ == "__main__":
 
     if not Path(WHISPER_BIN).exists():
         print(f"  ⚠ whisper-cli not found (local mode unavailable)")
-    if not GROQ_API_KEY:
-        print(f"  ⚠ GROQ_API_KEY not set — add to .env for cloud mode")
+    if not GROQ_API_KEY_DICTATION:
+        print(f"  ⚠ GROQ_API_KEY_DICTATION not set — add to .env for cloud mode")
         print(f"    Get free key: https://console.groq.com/keys")
 
-    if not GROQ_API_KEY and not Path(WHISPER_BIN).exists():
-        print("  ✗ No transcription engine available. Set GROQ_API_KEY or install whisper.cpp.")
+    if not GROQ_API_KEY_DICTATION and not Path(WHISPER_BIN).exists():
+        print("  ✗ No transcription engine available. Set GROQ_API_KEY_DICTATION or install whisper.cpp.")
         sys.exit(1)
 
     trusted = check_accessibility()
@@ -662,12 +662,12 @@ if __name__ == "__main__":
             print("  ✗ Timed out. Grant Accessibility and reopen.\n")
             sys.exit(1)
 
-    default_mode = MODE_CLOUD if GROQ_API_KEY else MODE_LOCAL
+    default_mode = MODE_CLOUD if GROQ_API_KEY_DICTATION else MODE_LOCAL
     model_name = Path(WHISPER_MODEL).stem.replace("ggml-", "")
-    online = is_online() if GROQ_API_KEY else False
+    online = is_online() if GROQ_API_KEY_DICTATION else False
 
     print(f"  ✓ Accessibility: granted")
-    print(f"  ✓ Cloud engine: {'Groq whisper-large-v3' if GROQ_API_KEY else 'not configured'}")
+    print(f"  ✓ Cloud engine: {'Groq whisper-large-v3' if GROQ_API_KEY_DICTATION else 'not configured'}")
     print(f"  ✓ Local engine: {model_name if Path(WHISPER_BIN).exists() else 'not available'}")
     print(f"  ✓ Default mode: {default_mode}")
     print(f"  ✓ Internet: {'online' if online else 'offline'}")
@@ -676,6 +676,6 @@ if __name__ == "__main__":
     print()
 
     logger.info(f"=== auto-whisper v4.0 started ===")
-    logger.info(f"Mode: {default_mode}, cloud={'groq' if GROQ_API_KEY else 'none'}, local={model_name}")
+    logger.info(f"Mode: {default_mode}, cloud={'groq' if GROQ_API_KEY_DICTATION else 'none'}, local={model_name}")
     app = AutoWhisperApp()
     app.run()
