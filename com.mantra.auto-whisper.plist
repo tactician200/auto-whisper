@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mantra.auto-whisper</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/mantra/src/meeting-transcriber/.venv/bin/python</string>
+        <string>/Users/mantra/src/meeting-transcriber/dictation_daemon.py</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/mantra/MeetingTranscripts/logs/auto-whisper.out</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/mantra/MeetingTranscripts/logs/auto-whisper.err</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONPATH</key>
+        <string>/Users/mantra/src/meeting-transcriber</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>LANG</key>
+        <string>en_US.UTF-8</string>
+    </dict>
+</dict>
+</plist>

@@ -1,0 +1,6 @@
+sounddevice
+pynput
+rumps
+google-generativeai
+pyautogui
+numpy

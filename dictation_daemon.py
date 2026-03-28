@@ -1,0 +1,595 @@
+#!/usr/bin/env python3
+"""
+auto-whisper v4.0 — Live Dictation Daemon
+
+Modes:
+  - Cloud (default): Groq whisper-large-v3 API (~100ms latency)
+  - Local: whisper.cpp medium model (~6s latency)
+  - Auto: Cloud when online, falls back to Local
+
+Double-tap Right Cmd to toggle recording. Or click menu bar icon.
+"""
+
+import os
+import subprocess
+import threading
+import time
+import logging
+import sys
+import tempfile
+import shutil
+import wave
+import io
+import numpy as np
+import sounddevice as sd
+import rumps
+
+os.environ.setdefault("LANG", "en_US.UTF-8")
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+
+from pathlib import Path
+from AppKit import (
+    NSEvent, NSFlagsChangedMask, NSWorkspace,
+    NSPasteboard, NSPasteboardTypeString,
+    NSSound,
+)
+from Quartz import (
+    CGEventCreateKeyboardEvent, CGEventSetFlags, CGEventPost,
+    kCGHIDEventTap, kCGEventFlagMaskCommand,
+)
+from shared.config import (
+    WHISPER_BIN, WHISPER_MODEL, WHISPER_LANGUAGE,
+    SAMPLE_RATE, LOGS, GROQ_API_KEY,
+)
+
+LOGS.mkdir(parents=True, exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(LOGS / "dictation.log", encoding="utf-8"),
+        logging.StreamHandler(sys.stdout),
+    ],
+)
+logger = logging.getLogger(__name__)
+
+FRAMES_PER_BUFFER = 1024
+RIGHT_CMD_KEYCODE = 54
+DOUBLE_TAP_WINDOW = 0.4
+V_KEYCODE = 9
+
+WHISPER_PROMPT = "Hola, buenos días."
+
+# Transcription modes
+MODE_AUTO = "Auto"
+MODE_CLOUD = "Cloud (Groq)"
+MODE_LOCAL = "Local"
+
+# Language modes
+LANG_AUTO = "Auto-detect"
+LANG_ES = "Español"
+LANG_EN = "English"
+LANG_MAP = {LANG_AUTO: None, LANG_ES: "es", LANG_EN: "en"}
+
+
+# --- Sound feedback ---
+
+def play_sound(name: str):
+    """Play macOS system sound (non-blocking)."""
+    sound = NSSound.alloc().initWithContentsOfFile_byReference_(
+        f"/System/Library/Sounds/{name}.aiff", True
+    )
+    if sound:
+        sound.play()
+
+
+# --- Internet check ---
+
+def is_online() -> bool:
+    """Quick check if internet is available (DNS resolve)."""
+    import socket
+    try:
+        socket.create_connection(("api.groq.com", 443), timeout=1.5)
+        return True
+    except OSError:
+        return False
+
+
+# --- Permission checks ---
+
+def check_accessibility() -> bool:
+    import ApplicationServices
+    return ApplicationServices.AXIsProcessTrustedWithOptions(
+        {ApplicationServices.kAXTrustedCheckOptionPrompt: True}
+    )
+
+
+# --- Focus management ---
+
+def get_frontmost_app():
+    return NSWorkspace.sharedWorkspace().frontmostApplication()
+
+
+def restore_focus(app):
+    if not app:
+        return
+    try:
+        app.activateWithOptions_(2)
+        for _ in range(20):
+            time.sleep(0.05)
+            current = NSWorkspace.sharedWorkspace().frontmostApplication()
+            if current and current.processIdentifier() == app.processIdentifier():
+                break
+        time.sleep(0.1)
+    except Exception as e:
+        logger.warning(f"Could not restore focus: {e}")
+
+
+# --- Text injection ---
+
+def inject_text(text: str, target_app=None):
+    if not text or not text.strip():
+        return
+    text = text.strip()
+
+    def _do_inject():
+        if target_app:
+            restore_focus(target_app)
+
+        board = NSPasteboard.generalPasteboard()
+        old_content = board.stringForType_(NSPasteboardTypeString)
+
+        board.clearContents()
+        board.setString_forType_(text, NSPasteboardTypeString)
+        time.sleep(0.05)
+
+        event_down = CGEventCreateKeyboardEvent(None, V_KEYCODE, True)
+        event_up = CGEventCreateKeyboardEvent(None, V_KEYCODE, False)
+        CGEventSetFlags(event_down, kCGEventFlagMaskCommand)
+        CGEventSetFlags(event_up, kCGEventFlagMaskCommand)
+        CGEventPost(kCGHIDEventTap, event_down)
+        CGEventPost(kCGHIDEventTap, event_up)
+        time.sleep(0.2)
+
+        logger.info(f"Pasted {len(text)} chars")
+
+        time.sleep(1.0)
+        if old_content is not None:
+            board.clearContents()
+            board.setString_forType_(old_content, NSPasteboardTypeString)
+
+    threading.Thread(target=_do_inject, daemon=True).start()
+
+
+# --- Transcription: Cloud (Groq) ---
+
+def transcribe_cloud(audio_data: np.ndarray, language: str | None = "es") -> str | None:
+    """Transcribe via Groq whisper-large-v3 API. ~100ms latency."""
+    try:
+        from groq import Groq
+
+        pcm = (audio_data * 32767).astype(np.int16)
+        buf = io.BytesIO()
+        with wave.open(buf, "w") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(SAMPLE_RATE)
+            wf.writeframes(pcm.tobytes())
+        buf.seek(0)
+
+        client = Groq(api_key=GROQ_API_KEY)
+        t0 = time.time()
+        params = dict(
+            model="whisper-large-v3",
+            file=("audio.wav", buf),
+            prompt=WHISPER_PROMPT,
+            response_format="text",
+        )
+        if language:
+            params["language"] = language
+        result = client.audio.transcriptions.create(**params)
+        elapsed = time.time() - t0
+        logger.info(f"Groq transcription: {elapsed:.1f}s")
+
+        text = result.strip() if isinstance(result, str) else str(result).strip()
+        if text:
+            return _clean_transcription(text)
+        return None
+
+    except Exception as e:
+        logger.error(f"Groq API failed: {e}")
+        return None
+
+
+# --- Transcription: Local (whisper.cpp) ---
+
+def transcribe_local(audio_data: np.ndarray, language: str | None = "es") -> str | None:
+    """Transcribe via local whisper.cpp. ~6-8s latency."""
+    tmpdir = tempfile.mkdtemp()
+    try:
+        wav_path = os.path.join(tmpdir, "audio.wav")
+        out_base = os.path.join(tmpdir, "out")
+
+        with wave.open(wav_path, "w") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(SAMPLE_RATE)
+            pcm = (audio_data * 32767).astype(np.int16)
+            wf.writeframes(pcm.tobytes())
+
+        cmd = [
+            str(WHISPER_BIN), "-m", str(WHISPER_MODEL),
+            "-f", wav_path,
+            "-otxt", "-of", out_base, "--no-timestamps",
+            "--beam-size", "8",
+            "--prompt", WHISPER_PROMPT,
+            "--entropy-thold", "2.4",
+        ]
+        if language:
+            cmd.extend(["-l", language])
+
+        t0 = time.time()
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                encoding="utf-8", timeout=120)
+        elapsed = time.time() - t0
+        logger.info(f"Local transcription: {elapsed:.1f}s")
+
+        txt_file = Path(f"{out_base}.txt")
+        if result.returncode == 0 and txt_file.exists():
+            text = txt_file.read_text(encoding="utf-8").strip()
+            if text and not text.startswith("[") and not text.startswith("("):
+                return _clean_transcription(text)
+        return None
+    except Exception as e:
+        logger.error(f"Local transcription failed: {e}")
+        return None
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# --- Usage tracker ---
+
+class UsageTracker:
+    """Track daily Groq API usage against free tier limits."""
+    DAILY_AUDIO_LIMIT = 28800  # seconds (8 hours) — Groq free tier
+    DAILY_REQUEST_LIMIT = 2000
+
+    def __init__(self):
+        self._date = None
+        self.audio_seconds = 0.0
+        self.requests = 0
+        self._reset_if_new_day()
+
+    def _reset_if_new_day(self):
+        from datetime import date
+        today = date.today()
+        if self._date != today:
+            self._date = today
+            self.audio_seconds = 0.0
+            self.requests = 0
+
+    def record(self, audio_duration: float):
+        self._reset_if_new_day()
+        self.audio_seconds += audio_duration
+        self.requests += 1
+
+    @property
+    def audio_pct(self) -> float:
+        self._reset_if_new_day()
+        return min(self.audio_seconds / self.DAILY_AUDIO_LIMIT * 100, 100)
+
+    @property
+    def remaining_minutes(self) -> float:
+        self._reset_if_new_day()
+        return max((self.DAILY_AUDIO_LIMIT - self.audio_seconds) / 60, 0)
+
+    def format_bar(self) -> str:
+        """Return a compact usage bar for the menu."""
+        pct = self.audio_pct
+        used_min = self.audio_seconds / 60
+        total_min = self.DAILY_AUDIO_LIMIT / 60
+        blocks = int(pct / 10)
+        bar = "▓" * blocks + "░" * (10 - blocks)
+        return f"Usage: {bar} {used_min:.0f}/{total_min:.0f}min ({pct:.0f}%)"
+
+    @property
+    def is_near_limit(self) -> bool:
+        return self.audio_pct >= 80
+
+    @property
+    def is_over_limit(self) -> bool:
+        return self.audio_pct >= 100
+
+
+usage_tracker = UsageTracker()
+
+
+# --- Smart transcription router ---
+
+def transcribe_audio(audio_data: np.ndarray, mode: str, language: str | None = "es") -> tuple[str | None, str]:
+    """Route transcription based on mode. Returns (text, engine_used)."""
+    duration = len(audio_data) / SAMPLE_RATE
+    use_cloud = mode in (MODE_CLOUD, MODE_AUTO)
+
+    if use_cloud and usage_tracker.is_over_limit:
+        logger.warning(f"Daily Groq limit reached ({usage_tracker.audio_seconds:.0f}s). Using local.")
+        use_cloud = False
+
+    if use_cloud and mode == MODE_AUTO:
+        use_cloud = GROQ_API_KEY and is_online()
+
+    if use_cloud:
+        text = transcribe_cloud(audio_data, language=language)
+        if text:
+            usage_tracker.record(duration)
+            logger.info(f"Groq usage: {usage_tracker.format_bar()}")
+            return text, "groq"
+        logger.warning("Cloud failed, trying local fallback...")
+
+    text = transcribe_local(audio_data, language=language)
+    engine = "local" if mode == MODE_LOCAL else "local (fallback)"
+    return text, engine
+
+
+def _clean_transcription(text: str) -> str:
+    hallucinations = [
+        "Subtítulos realizados por la comunidad de Amara.org",
+        "Subtítulos por la comunidad de Amara.org",
+        "Gracias por ver el vídeo",
+        "¡Suscríbete al canal!",
+        "Hola, buenos días.",
+        "www.", "http",
+    ]
+    for h in hallucinations:
+        if h.lower() in text.lower():
+            return ""
+    text = text.strip(" \n\t-–—")
+    while "  " in text:
+        text = text.replace("  ", " ")
+    return text
+
+
+# --- Menu bar app ---
+
+class AutoWhisperApp(rumps.App):
+    ICON_IDLE = "◎"
+    ICON_STARTING = "◠"
+    ICON_RECORDING = "◉"
+    ICON_PROCESSING = "⟳"
+
+    def __init__(self):
+        super().__init__("auto-whisper", quit_button="Quit")
+        self.recording = False
+        self.audio_frames = []
+        self.stream = None
+        self._target_app = None
+        self.title = self.ICON_IDLE
+        self._last_rcmd_time = 0
+        self._rcmd_was_down = False
+        self._last_transcription = None
+
+        # Default mode
+        self._mode = MODE_CLOUD if GROQ_API_KEY else MODE_LOCAL
+        self._language = LANG_ES
+
+        # Engine submenu
+        self._mode_cloud = rumps.MenuItem(MODE_CLOUD, callback=self._set_mode)
+        self._mode_local = rumps.MenuItem(MODE_LOCAL, callback=self._set_mode)
+        self._mode_auto = rumps.MenuItem(MODE_AUTO, callback=self._set_mode)
+        self._update_mode_checks()
+
+        # Language submenu
+        self._lang_auto = rumps.MenuItem(LANG_AUTO, callback=self._set_language)
+        self._lang_es = rumps.MenuItem(LANG_ES, callback=self._set_language)
+        self._lang_en = rumps.MenuItem(LANG_EN, callback=self._set_language)
+        self._update_lang_checks()
+
+        self._usage_item = rumps.MenuItem(usage_tracker.format_bar())
+        self._status_item = rumps.MenuItem("Status: idle")
+
+        self.menu = [
+            rumps.MenuItem("Toggle (⌘⌘)", callback=self._menu_toggle),
+            rumps.MenuItem("Paste last", callback=self._paste_last),
+            None,
+            [rumps.MenuItem("Engine"), [self._mode_cloud, self._mode_local, self._mode_auto]],
+            [rumps.MenuItem("Language"), [self._lang_es, self._lang_en, self._lang_auto]],
+            self._usage_item,
+            self._status_item,
+        ]
+        self._setup_hotkey()
+
+    def _set_mode(self, sender):
+        self._mode = sender.title
+        self._update_mode_checks()
+        logger.info(f"Mode changed to: {self._mode}")
+
+    def _update_mode_checks(self):
+        self._mode_cloud.state = self._mode == MODE_CLOUD
+        self._mode_local.state = self._mode == MODE_LOCAL
+        self._mode_auto.state = self._mode == MODE_AUTO
+
+    def _set_language(self, sender):
+        self._language = sender.title
+        self._update_lang_checks()
+        logger.info(f"Language changed to: {self._language}")
+
+    def _update_lang_checks(self):
+        self._lang_auto.state = self._language == LANG_AUTO
+        self._lang_es.state = self._language == LANG_ES
+        self._lang_en.state = self._language == LANG_EN
+
+    def _paste_last(self, _):
+        """Re-paste the last transcription."""
+        if self._last_transcription:
+            inject_text(self._last_transcription, target_app=get_frontmost_app())
+        else:
+            self._set_ui(self.ICON_IDLE, "No previous transcription")
+
+    def _setup_hotkey(self):
+        def handler(event):
+            try:
+                if event.keyCode() != RIGHT_CMD_KEYCODE:
+                    return
+                flags = event.modifierFlags()
+                rcmd_down = bool(flags & (1 << 4))
+
+                if rcmd_down and not self._rcmd_was_down:
+                    now = time.time()
+                    if now - self._last_rcmd_time < DOUBLE_TAP_WINDOW:
+                        logger.info("Double-tap Right ⌘ detected")
+                        self._on_hotkey()
+                        self._last_rcmd_time = 0
+                    else:
+                        self._last_rcmd_time = now
+                self._rcmd_was_down = rcmd_down
+            except Exception as e:
+                logger.error(f"Hotkey handler error: {e}")
+
+        self._monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+            NSFlagsChangedMask, handler
+        )
+        logger.info("NSEvent hotkey monitor active (double-tap Right ⌘)")
+
+    def _on_hotkey(self):
+        if self.recording:
+            self._stop_and_transcribe()
+        else:
+            self._start_recording()
+
+    def _start_recording(self):
+        if self.recording:
+            return
+        self.recording = True
+        self.audio_frames = []
+        self._target_app = get_frontmost_app()
+        self._set_ui(self.ICON_STARTING, "Starting mic...")
+        target_name = self._target_app.localizedName() if self._target_app else "unknown"
+        logger.info(f"Initializing mic... (target: {target_name}, mode: {self._mode})")
+
+        def record():
+            try:
+                self.stream = sd.InputStream(
+                    samplerate=SAMPLE_RATE, channels=1,
+                    dtype="float32", blocksize=FRAMES_PER_BUFFER,
+                    callback=self._audio_callback,
+                )
+                self.stream.start()
+                play_sound("Funk")  # beep on start
+                self._set_ui(self.ICON_RECORDING, "Recording...")
+                logger.info("Recording started")
+            except Exception as e:
+                logger.error(f"Failed to start recording: {e}")
+                self.recording = False
+                self._set_ui(self.ICON_IDLE, "Mic error")
+
+        threading.Thread(target=record, daemon=True).start()
+
+    def _audio_callback(self, indata, frames, time_info, status):
+        if self.recording:
+            self.audio_frames.append(indata.copy())
+
+    def _stop_and_transcribe(self):
+        self.recording = False
+
+        if self.stream:
+            self.stream.stop()
+            self.stream.close()
+            self.stream = None
+
+        if not self.audio_frames:
+            self._set_ui(self.ICON_IDLE, "No audio captured")
+            return
+
+        play_sound("Pop")  # pop on stop
+        engine_label = "groq" if self._mode != MODE_LOCAL else "local"
+        self._set_ui(self.ICON_PROCESSING, f"Transcribing ({engine_label})...")
+        logger.info(f"Recording stopped. {len(self.audio_frames)} chunks captured")
+
+        def process():
+            audio = np.concatenate(self.audio_frames, axis=0).flatten()
+            duration = len(audio) / SAMPLE_RATE
+            logger.info(f"Audio duration: {duration:.1f}s")
+
+            rms = np.sqrt(np.mean(audio ** 2))
+            logger.info(f"Audio RMS: {rms:.6f}")
+            if rms < 0.0005:
+                logger.info("Silent recording, skipping")
+                self._set_ui(self.ICON_IDLE, "Too quiet")
+                return
+
+            lang_code = LANG_MAP.get(self._language, "es")
+            text, engine = transcribe_audio(audio, self._mode, language=lang_code)
+            if text:
+                logger.info(f"[{engine}] Transcribed: {text[:80]}...")
+                self._last_transcription = text
+                inject_text(text, target_app=self._target_app)
+                self._set_ui(self.ICON_IDLE, f"OK ({engine}): {text[:30]}...")
+            else:
+                logger.warning("Transcription returned empty")
+                self._set_ui(self.ICON_IDLE, "No speech detected")
+
+        threading.Thread(target=process, daemon=True).start()
+
+    def _set_ui(self, icon: str, status: str):
+        from PyObjCTools import AppHelper
+        def _update():
+            self.title = icon
+            try:
+                self._status_item.title = f"Status: {status}"
+                self._usage_item.title = usage_tracker.format_bar()
+            except Exception:
+                pass
+        AppHelper.callAfter(_update)
+
+    def _menu_toggle(self, _):
+        self._on_hotkey()
+
+
+if __name__ == "__main__":
+    print("\n  auto-whisper v4.0")
+    print("  ─────────────────")
+
+    if not Path(WHISPER_BIN).exists():
+        print(f"  ⚠ whisper-cli not found (local mode unavailable)")
+    if not GROQ_API_KEY:
+        print(f"  ⚠ GROQ_API_KEY not set — add to .env for cloud mode")
+        print(f"    Get free key: https://console.groq.com/keys")
+
+    if not GROQ_API_KEY and not Path(WHISPER_BIN).exists():
+        print("  ✗ No transcription engine available. Set GROQ_API_KEY or install whisper.cpp.")
+        sys.exit(1)
+
+    trusted = check_accessibility()
+    if not trusted:
+        print("  ⚠ Accessibility permission required!")
+        print("  Grant permission, then wait...")
+        import ApplicationServices
+        for i in range(60):
+            time.sleep(1)
+            if ApplicationServices.AXIsProcessTrusted():
+                trusted = True
+                print("  ✓ Permission granted!")
+                break
+            if i % 5 == 4:
+                print(f"  ... waiting ({60 - i}s)")
+        if not trusted:
+            print("  ✗ Timed out. Grant Accessibility and reopen.\n")
+            sys.exit(1)
+
+    default_mode = MODE_CLOUD if GROQ_API_KEY else MODE_LOCAL
+    model_name = Path(WHISPER_MODEL).stem.replace("ggml-", "")
+    online = is_online() if GROQ_API_KEY else False
+
+    print(f"  ✓ Accessibility: granted")
+    print(f"  ✓ Cloud engine: {'Groq whisper-large-v3' if GROQ_API_KEY else 'not configured'}")
+    print(f"  ✓ Local engine: {model_name if Path(WHISPER_BIN).exists() else 'not available'}")
+    print(f"  ✓ Default mode: {default_mode}")
+    print(f"  ✓ Internet: {'online' if online else 'offline'}")
+    print(f"  ✓ Hotkey: double-tap Right ⌘")
+    print(f"  ✓ Switch mode: click ◎ → Engine")
+    print()
+
+    logger.info(f"=== auto-whisper v4.0 started ===")
+    logger.info(f"Mode: {default_mode}, cloud={'groq' if GROQ_API_KEY else 'none'}, local={model_name}")
+    app = AutoWhisperApp()
+    app.run()
