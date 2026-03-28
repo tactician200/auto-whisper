@@ -55,8 +55,10 @@ logger = logging.getLogger(__name__)
 
 FRAMES_PER_BUFFER = 1024
 RIGHT_CMD_KEYCODE = 54
+LEFT_CMD_KEYCODE = 55
 DOUBLE_TAP_WINDOW = 0.4
 V_KEYCODE = 9
+C_KEYCODE = 8
 
 # No sentence prompt — only vocabulary hints to avoid hallucination on long audio
 WHISPER_PROMPT = None
@@ -136,6 +138,30 @@ def restore_focus(app):
         time.sleep(0.1)
     except Exception as e:
         logger.warning(f"Could not restore focus: {e}")
+
+
+# --- Text capture (selected text via Cmd+C) ---
+
+def capture_selected_text() -> str | None:
+    """Simulate Cmd+C and read clipboard. Returns selected text or None."""
+    board = NSPasteboard.generalPasteboard()
+    old_count = board.changeCount()
+
+    # Simulate Cmd+C
+    c_down = CGEventCreateKeyboardEvent(None, C_KEYCODE, True)
+    c_up = CGEventCreateKeyboardEvent(None, C_KEYCODE, False)
+    CGEventSetFlags(c_down, kCGEventFlagMaskCommand)
+    CGEventSetFlags(c_up, kCGEventFlagMaskCommand)
+    CGEventPost(kCGHIDEventTap, c_down)
+    CGEventPost(kCGHIDEventTap, c_up)
+    time.sleep(0.15)
+
+    # Check if clipboard changed
+    if board.changeCount() == old_count:
+        return None
+
+    text = board.stringForType_(NSPasteboardTypeString)
+    return text.strip() if text else None
 
 
 # --- Text injection ---
@@ -409,6 +435,7 @@ class AutoWhisperApp(rumps.App):
     ICON_STARTING = "◠"
     ICON_RECORDING = "◉"
     ICON_PROCESSING = "⟳"
+    ICON_SPEAKING = "◈"
 
     def __init__(self):
         super().__init__("auto-whisper", quit_button="Quit")
@@ -422,7 +449,10 @@ class AutoWhisperApp(rumps.App):
         self.title = self.ICON_IDLE
         self._last_rcmd_time = 0
         self._rcmd_was_down = False
+        self._last_lcmd_time = 0
+        self._lcmd_was_down = False
         self._last_transcription = None
+        self._speaking_process = None
 
         # Default mode
         self._mode = MODE_CLOUD if GROQ_API_KEY_DICTATION else MODE_LOCAL
@@ -444,10 +474,13 @@ class AutoWhisperApp(rumps.App):
         self._status_item = rumps.MenuItem("Status: idle")
 
         self.menu = [
-            rumps.MenuItem("Toggle (⌘⌘)", callback=self._menu_toggle),
-            rumps.MenuItem("Paste last", callback=self._paste_last),
-            rumps.MenuItem("Read clipboard", callback=self._read_clipboard),
+            rumps.MenuItem("Dictate (Right ⌘⌘)", callback=self._menu_toggle),
             None,
+            rumps.MenuItem("Summarize selection (Left ⌘⌘)", callback=self._menu_summarize),
+            rumps.MenuItem("Read selection", callback=self._menu_read),
+            rumps.MenuItem("Explain selection", callback=self._menu_explain),
+            None,
+            rumps.MenuItem("Paste last", callback=self._paste_last),
             [rumps.MenuItem("Engine"), [self._mode_cloud, self._mode_local, self._mode_auto]],
             [rumps.MenuItem("Language"), [self._lang_es, self._lang_en, self._lang_auto]],
             self._usage_item,
@@ -482,45 +515,107 @@ class AutoWhisperApp(rumps.App):
         else:
             self._set_ui(self.ICON_IDLE, "No previous transcription")
 
-    def _read_clipboard(self, _):
-        """Read clipboard text aloud via TTS."""
-        board = NSPasteboard.generalPasteboard()
-        text = board.stringForType_(NSPasteboardTypeString)
-        if text and text.strip():
-            self._set_ui("🔊", "Speaking...")
-            from voice_agent import speak_async
-            def _speak_and_reset():
+    # --- Text processing actions ---
+
+    def _process_selection(self, action: str):
+        """Capture selected text and process it (summarize/read/explain)."""
+        def _do():
+            text = capture_selected_text()
+            if not text:
+                # Fallback: try clipboard as-is
+                board = NSPasteboard.generalPasteboard()
+                text = board.stringForType_(NSPasteboardTypeString)
+
+            if not text or not text.strip():
+                self._set_ui(self.ICON_IDLE, "No text selected")
+                return
+
+            text = text.strip()
+            logger.info(f"[{action}] Processing {len(text)} chars...")
+
+            if action == "read":
+                self._set_ui(self.ICON_SPEAKING, "Reading...")
                 from voice_agent import speak
-                speak(text.strip())
-                self._set_ui(self.ICON_IDLE, "Done speaking")
-            threading.Thread(target=_speak_and_reset, daemon=True).start()
-        else:
-            self._set_ui(self.ICON_IDLE, "Clipboard empty")
+                speak(text)
+                self._set_ui(self.ICON_IDLE, "Done")
+                return
+
+            # Summarize or explain via Groq LLM
+            self._set_ui(self.ICON_PROCESSING, f"{action.capitalize()}...")
+            play_sound("Glass")
+
+            from text_processor import summarize, explain, notify
+            if action == "summarize":
+                voice_text, data_text = summarize(text)
+            else:
+                voice_text, data_text = explain(text)
+
+            if not voice_text:
+                self._set_ui(self.ICON_IDLE, "Processing failed")
+                return
+
+            # Show data as notification
+            if data_text:
+                notify("auto-whisper", data_text)
+
+            # Speak the narrative
+            self._set_ui(self.ICON_SPEAKING, f"{action.capitalize()}...")
+            from voice_agent import speak
+            speak(voice_text)
+            self._set_ui(self.ICON_IDLE, "Done")
+
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _menu_summarize(self, _):
+        self._process_selection("summarize")
+
+    def _menu_read(self, _):
+        self._process_selection("read")
+
+    def _menu_explain(self, _):
+        self._process_selection("explain")
+
+    # --- Hotkeys ---
 
     def _setup_hotkey(self):
         def handler(event):
             try:
-                if event.keyCode() != RIGHT_CMD_KEYCODE:
-                    return
+                kc = event.keyCode()
                 flags = event.modifierFlags()
-                rcmd_down = bool(flags & (1 << 4))
 
-                if rcmd_down and not self._rcmd_was_down:
-                    now = time.time()
-                    if now - self._last_rcmd_time < DOUBLE_TAP_WINDOW:
-                        logger.info("Double-tap Right ⌘ detected")
-                        self._on_hotkey()
-                        self._last_rcmd_time = 0
-                    else:
-                        self._last_rcmd_time = now
-                self._rcmd_was_down = rcmd_down
+                # Right ⌘ — dictation toggle
+                if kc == RIGHT_CMD_KEYCODE:
+                    rcmd_down = bool(flags & (1 << 4))
+                    if rcmd_down and not self._rcmd_was_down:
+                        now = time.time()
+                        if now - self._last_rcmd_time < DOUBLE_TAP_WINDOW:
+                            logger.info("Double-tap Right ⌘ → dictation")
+                            self._on_hotkey()
+                            self._last_rcmd_time = 0
+                        else:
+                            self._last_rcmd_time = now
+                    self._rcmd_was_down = rcmd_down
+
+                # Left ⌘ — summarize selection
+                elif kc == LEFT_CMD_KEYCODE:
+                    lcmd_down = bool(flags & (1 << 3))  # NX_DEVICELCMDKEYMASK
+                    if lcmd_down and not self._lcmd_was_down:
+                        now = time.time()
+                        if now - self._last_lcmd_time < DOUBLE_TAP_WINDOW:
+                            logger.info("Double-tap Left ⌘ → summarize")
+                            self._process_selection("summarize")
+                            self._last_lcmd_time = 0
+                        else:
+                            self._last_lcmd_time = now
+                    self._lcmd_was_down = lcmd_down
+
             except Exception as e:
                 logger.error(f"Hotkey handler error: {e}")
 
         self._monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
             NSFlagsChangedMask, handler
         )
-        logger.info("NSEvent hotkey monitor active (double-tap Right ⌘)")
+        logger.info("Hotkeys: Right ⌘⌘ = dictate, Left ⌘⌘ = summarize")
 
     def _on_hotkey(self):
         if self.recording:
