@@ -446,6 +446,7 @@ class AutoWhisperApp(rumps.App):
         self.menu = [
             rumps.MenuItem("Toggle (⌘⌘)", callback=self._menu_toggle),
             rumps.MenuItem("Paste last", callback=self._paste_last),
+            rumps.MenuItem("Read clipboard", callback=self._read_clipboard),
             None,
             [rumps.MenuItem("Engine"), [self._mode_cloud, self._mode_local, self._mode_auto]],
             [rumps.MenuItem("Language"), [self._lang_es, self._lang_en, self._lang_auto]],
@@ -480,6 +481,21 @@ class AutoWhisperApp(rumps.App):
             inject_text(self._last_transcription, target_app=get_frontmost_app())
         else:
             self._set_ui(self.ICON_IDLE, "No previous transcription")
+
+    def _read_clipboard(self, _):
+        """Read clipboard text aloud via TTS."""
+        board = NSPasteboard.generalPasteboard()
+        text = board.stringForType_(NSPasteboardTypeString)
+        if text and text.strip():
+            self._set_ui("🔊", "Speaking...")
+            from voice_agent import speak_async
+            def _speak_and_reset():
+                from voice_agent import speak
+                speak(text.strip())
+                self._set_ui(self.ICON_IDLE, "Done speaking")
+            threading.Thread(target=_speak_and_reset, daemon=True).start()
+        else:
+            self._set_ui(self.ICON_IDLE, "Clipboard empty")
 
     def _setup_hotkey(self):
         def handler(event):
@@ -583,9 +599,10 @@ class AutoWhisperApp(rumps.App):
 
             rms = np.sqrt(np.mean(audio ** 2))
             logger.info(f"Audio RMS: {rms:.6f}")
-            if rms < 0.0005:
-                logger.info("Silent recording, skipping")
-                self._set_ui(self.ICON_IDLE, "Too quiet")
+            if rms < 0.005:
+                logger.info(f"Silent/noise only (RMS: {rms:.6f}), skipping")
+                play_sound("Funk")  # notify user it was too quiet
+                self._set_ui(self.ICON_IDLE, f"Too quiet (RMS: {rms:.4f})")
                 return
 
             lang_code = LANG_MAP.get(self._language, "es")
