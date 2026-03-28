@@ -57,26 +57,3 @@ def transcribe_file(wav_path: Path, output_path: Path, model: Path | None = None
         return None
 
 
-def transcribe_chunk(audio_data, sample_rate: int = SAMPLE_RATE) -> str | None:
-    """Transcribe a numpy audio array (for live dictation). Returns text or None."""
-    import numpy as np
-
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        tmp_path = Path(tmp.name)
-
-    try:
-        import wave
-        with wave.open(str(tmp_path), "w") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)  # 16-bit
-            wf.setframerate(sample_rate)
-            wf.writeframes((audio_data * 32767).astype(np.int16).tobytes())
-
-        with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as out_tmp:
-            out_path = Path(out_tmp.name)
-
-        text = transcribe_file(tmp_path, out_path)
-        return text if text else None
-    finally:
-        tmp_path.unlink(missing_ok=True)
-        Path(str(out_path.with_suffix("")) + ".txt").unlink(missing_ok=True)

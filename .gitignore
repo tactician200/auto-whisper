@@ -22,3 +22,5 @@ setup_app.py
 *.log
 *.out
 *.err
+com.dictationdaemon.plist
+setup.sh

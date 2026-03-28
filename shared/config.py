@@ -8,7 +8,9 @@ if _env_file.exists():
         line = line.strip()
         if line and not line.startswith("#") and "=" in line:
             key, val = line.split("=", 1)
-            os.environ.setdefault(key.strip(), val.strip())
+            val = val.strip().strip("'\"")  # strip quotes
+            val = val.split("#")[0].strip()  # strip inline comments
+            os.environ.setdefault(key.strip(), val)
 
 # Directories
 HOME = Path.home()
@@ -37,11 +39,6 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 # Audio
 SUPPORTED_FORMATS = {".m4a", ".mp3", ".wav", ".aac", ".webm", ".ogg", ".mp4"}
 SAMPLE_RATE = 16000
-
-# Dictation
-DICTATION_HOTKEY = "<cmd>+<shift>+<space>"
-DICTATION_CHUNK_SECONDS = 3
-DICTATION_IDLE_TIMEOUT = 60  # seconds before unloading model
 
 # Prompts
 PROMPTS_DIR = Path(__file__).parent.parent / "prompts"

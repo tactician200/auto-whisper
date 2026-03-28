@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.mantra.auto-whisper</string>
+    <string>com.auto-whisper</string>
 
     <key>ProgramArguments</key>
     <array>

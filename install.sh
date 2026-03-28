@@ -70,7 +70,7 @@ fi
 
 echo "  Installing dependencies..."
 "$VENV_DIR/bin/pip" install -q --upgrade pip
-"$VENV_DIR/bin/pip" install -q rumps numpy sounddevice groq pyobjc-framework-Cocoa pyobjc-framework-Quartz pyobjc-framework-ApplicationServices
+"$VENV_DIR/bin/pip" install -q rumps numpy sounddevice groq google-genai pyobjc-framework-Cocoa pyobjc-framework-Quartz pyobjc-framework-ApplicationServices
 echo "  ✓ Dependencies installed"
 
 # --- Setup whisper.cpp (local fallback) ---

@@ -38,7 +38,7 @@ from Quartz import (
     kCGHIDEventTap, kCGEventFlagMaskCommand,
 )
 from shared.config import (
-    WHISPER_BIN, WHISPER_MODEL, WHISPER_LANGUAGE,
+    WHISPER_BIN, WHISPER_MODEL,
     SAMPLE_RATE, LOGS, GROQ_API_KEY,
 )
 
@@ -60,6 +60,18 @@ V_KEYCODE = 9
 
 # No sentence prompt — only vocabulary hints to avoid hallucination on long audio
 WHISPER_PROMPT = None
+MAX_RECORDING_SECONDS = 300  # 5 min auto-stop guard
+
+# Lazy-init Groq client (reuse connection pool)
+_groq_client = None
+
+
+def _get_groq_client():
+    global _groq_client
+    if _groq_client is None:
+        from groq import Groq
+        _groq_client = Groq(api_key=GROQ_API_KEY)
+    return _groq_client
 
 # Transcription modes
 MODE_AUTO = "Auto"
@@ -134,30 +146,30 @@ def inject_text(text: str, target_app=None):
     text = text.strip()
 
     def _do_inject():
-        if target_app:
-            restore_focus(target_app)
-
         board = NSPasteboard.generalPasteboard()
         old_content = board.stringForType_(NSPasteboardTypeString)
+        try:
+            if target_app:
+                restore_focus(target_app)
 
-        board.clearContents()
-        board.setString_forType_(text, NSPasteboardTypeString)
-        time.sleep(0.05)
-
-        event_down = CGEventCreateKeyboardEvent(None, V_KEYCODE, True)
-        event_up = CGEventCreateKeyboardEvent(None, V_KEYCODE, False)
-        CGEventSetFlags(event_down, kCGEventFlagMaskCommand)
-        CGEventSetFlags(event_up, kCGEventFlagMaskCommand)
-        CGEventPost(kCGHIDEventTap, event_down)
-        CGEventPost(kCGHIDEventTap, event_up)
-        time.sleep(0.2)
-
-        logger.info(f"Pasted {len(text)} chars")
-
-        time.sleep(1.0)
-        if old_content is not None:
             board.clearContents()
-            board.setString_forType_(old_content, NSPasteboardTypeString)
+            board.setString_forType_(text, NSPasteboardTypeString)
+            time.sleep(0.05)
+
+            event_down = CGEventCreateKeyboardEvent(None, V_KEYCODE, True)
+            event_up = CGEventCreateKeyboardEvent(None, V_KEYCODE, False)
+            CGEventSetFlags(event_down, kCGEventFlagMaskCommand)
+            CGEventSetFlags(event_up, kCGEventFlagMaskCommand)
+            CGEventPost(kCGHIDEventTap, event_down)
+            CGEventPost(kCGHIDEventTap, event_up)
+            time.sleep(0.2)
+
+            logger.info(f"Pasted {len(text)} chars")
+        finally:
+            time.sleep(1.0)
+            if old_content is not None:
+                board.clearContents()
+                board.setString_forType_(old_content, NSPasteboardTypeString)
 
     threading.Thread(target=_do_inject, daemon=True).start()
 
@@ -167,8 +179,6 @@ def inject_text(text: str, target_app=None):
 def transcribe_cloud(audio_data: np.ndarray, language: str | None = "es") -> str | None:
     """Transcribe via Groq whisper-large-v3 API. ~100ms latency."""
     try:
-        from groq import Groq
-
         pcm = (audio_data * 32767).astype(np.int16)
         buf = io.BytesIO()
         with wave.open(buf, "w") as wf:
@@ -178,7 +188,7 @@ def transcribe_cloud(audio_data: np.ndarray, language: str | None = "es") -> str
             wf.writeframes(pcm.tobytes())
         buf.seek(0)
 
-        client = Groq(api_key=GROQ_API_KEY)
+        client = _get_groq_client()
         t0 = time.time()
         params = dict(
             model="whisper-large-v3",
@@ -193,9 +203,12 @@ def transcribe_cloud(audio_data: np.ndarray, language: str | None = "es") -> str
         elapsed = time.time() - t0
         logger.info(f"Groq transcription: {elapsed:.1f}s")
 
-        text = result.strip() if isinstance(result, str) else str(result).strip()
+        if not isinstance(result, str):
+            logger.error(f"Unexpected Groq response type: {type(result)}")
+            return None
+        text = result.strip()
         if text:
-            return _clean_transcription(text)
+            return _clean_transcription(text) or None
         return None
 
     except Exception as e:
@@ -240,8 +253,9 @@ def transcribe_local(audio_data: np.ndarray, language: str | None = "es") -> str
         txt_file = Path(f"{out_base}.txt")
         if result.returncode == 0 and txt_file.exists():
             text = txt_file.read_text(encoding="utf-8").strip()
-            if text and not text.startswith("[") and not text.startswith("("):
-                return _clean_transcription(text)
+            WHISPER_ARTIFACTS = {"[BLANK_AUDIO]", "[Music]", "[Applause]", "[Silence]", "(Silence)", "(Music)"}
+            if text and text not in WHISPER_ARTIFACTS:
+                return _clean_transcription(text) or None
         return None
     except Exception as e:
         logger.error(f"Local transcription failed: {e}")
@@ -400,8 +414,11 @@ class AutoWhisperApp(rumps.App):
         super().__init__("auto-whisper", quit_button="Quit")
         self.recording = False
         self.audio_frames = []
+        self._frames_lock = threading.Lock()
         self.stream = None
         self._target_app = None
+        self._monitor = None
+        self._record_start_time = None
         self.title = self.ICON_IDLE
         self._last_rcmd_time = 0
         self._rcmd_was_down = False
@@ -499,7 +516,9 @@ class AutoWhisperApp(rumps.App):
         if self.recording:
             return
         self.recording = True
-        self.audio_frames = []
+        with self._frames_lock:
+            self.audio_frames = []
+        self._record_start_time = time.time()
         self._target_app = get_frontmost_app()
         self._set_ui(self.ICON_STARTING, "Starting mic...")
         target_name = self._target_app.localizedName() if self._target_app else "unknown"
@@ -525,17 +544,30 @@ class AutoWhisperApp(rumps.App):
 
     def _audio_callback(self, indata, frames, time_info, status):
         if self.recording:
-            self.audio_frames.append(indata.copy())
+            with self._frames_lock:
+                self.audio_frames.append(indata.copy())
+            # Auto-stop guard
+            if self._record_start_time and (time.time() - self._record_start_time > MAX_RECORDING_SECONDS):
+                logger.warning(f"Max recording duration ({MAX_RECORDING_SECONDS}s) reached, auto-stopping")
+                play_sound("Basso")
+                self._on_hotkey()
 
     def _stop_and_transcribe(self):
         self.recording = False
 
         if self.stream:
-            self.stream.stop()
-            self.stream.close()
+            try:
+                self.stream.stop()
+                self.stream.close()
+            except Exception as e:
+                logger.warning(f"Stream close error: {e}")
             self.stream = None
 
-        if not self.audio_frames:
+        with self._frames_lock:
+            frames_copy = list(self.audio_frames)
+            self.audio_frames = []
+
+        if not frames_copy:
             self._set_ui(self.ICON_IDLE, "No audio captured")
             return
 
@@ -545,7 +577,7 @@ class AutoWhisperApp(rumps.App):
         logger.info(f"Recording stopped. {len(self.audio_frames)} chunks captured")
 
         def process():
-            audio = np.concatenate(self.audio_frames, axis=0).flatten()
+            audio = np.concatenate(frames_copy, axis=0).flatten()
             duration = len(audio) / SAMPLE_RATE
             logger.info(f"Audio duration: {duration:.1f}s")
 
@@ -585,6 +617,18 @@ class AutoWhisperApp(rumps.App):
 
     def _menu_toggle(self, _):
         self._on_hotkey()
+
+    @rumps.events.before_quit
+    def _cleanup(self):
+        if self._monitor:
+            NSEvent.removeMonitor_(self._monitor)
+            self._monitor = None
+        if self.stream:
+            try:
+                self.stream.stop()
+                self.stream.close()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

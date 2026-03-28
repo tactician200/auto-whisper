@@ -17,10 +17,10 @@
     </array>
 
     <key>StandardOutPath</key>
-    <string>/tmp/meetingtranscriber.out</string>
+    <string>/Users/mantra/MeetingTranscripts/logs/meetingtranscriber.out</string>
 
     <key>StandardErrorPath</key>
-    <string>/tmp/meetingtranscriber.err</string>
+    <string>/Users/mantra/MeetingTranscripts/logs/meetingtranscriber.err</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -28,6 +28,8 @@
         <string>/Users/mantra/src/meeting-transcriber</string>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>LANG</key>
+        <string>en_US.UTF-8</string>
     </dict>
 </dict>
 </plist>
