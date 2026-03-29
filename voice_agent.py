@@ -119,18 +119,6 @@ def _clean_for_speech(text: str) -> str:
     return text.strip()
 
 
-def _apply_ssml_markers(text: str) -> str:
-    """Convert [E]...[/E] and [P] markers to text hints for natural speech."""
-    import re
-    # [P] → comma pause (Edge TTS respects punctuation pauses)
-    text = re.sub(r'\[P\]', ', ', text)
-    # [E]...[/E] → just keep the text (Edge TTS doesn't support inline SSML,
-    # but the emphasis words are naturally stressed in context)
-    text = re.sub(r'\[E\](.*?)\[/E\]', r'\1', text)
-    # [DATA]...[/DATA] → remove (already extracted by text_processor)
-    text = re.sub(r'\[DATA\].*?\[/DATA\]', '', text, flags=re.DOTALL)
-    return text.strip()
-
 
 def speak(text: str, backend: str = DEFAULT_BACKEND, voice: str | None = None,
           block: bool = True):
@@ -142,9 +130,6 @@ def speak(text: str, backend: str = DEFAULT_BACKEND, voice: str | None = None,
         return
 
     text = _clean_for_speech(text.strip())
-    # Convert inflection markers to SSML for Edge TTS
-    if backend == "edge":
-        text = _apply_ssml_markers(text)
 
     suffix = ".aiff" if backend == "macos" else ".mp3"
     fd, tmp_name = tempfile.mkstemp(suffix=suffix)

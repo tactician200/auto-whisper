@@ -473,14 +473,26 @@ class AutoWhisperApp(rumps.App):
         self._usage_item = rumps.MenuItem(usage_tracker.format_bar())
         self._status_item = rumps.MenuItem("Status: idle")
 
+        # Build menu items with callbacks assigned explicitly
+        self._btn_dictate = rumps.MenuItem("Dictate (Right ⌘⌘)")
+        self._btn_dictate.set_callback(self._menu_toggle)
+        self._btn_summarize = rumps.MenuItem("Summarize clipboard")
+        self._btn_summarize.set_callback(self._menu_summarize)
+        self._btn_read = rumps.MenuItem("Read clipboard")
+        self._btn_read.set_callback(self._menu_read)
+        self._btn_explain = rumps.MenuItem("Explain clipboard")
+        self._btn_explain.set_callback(self._menu_explain)
+        self._btn_paste = rumps.MenuItem("Paste last")
+        self._btn_paste.set_callback(self._paste_last)
+
         self.menu = [
-            rumps.MenuItem("Dictate (Right ⌘⌘)", callback=self._menu_toggle),
+            self._btn_dictate,
             None,
-            rumps.MenuItem("Summarize selection (Left ⌘⌘)", callback=self._menu_summarize),
-            rumps.MenuItem("Read selection", callback=self._menu_read),
-            rumps.MenuItem("Explain selection", callback=self._menu_explain),
+            self._btn_summarize,
+            self._btn_read,
+            self._btn_explain,
             None,
-            rumps.MenuItem("Paste last", callback=self._paste_last),
+            self._btn_paste,
             [rumps.MenuItem("Engine"), [self._mode_cloud, self._mode_local, self._mode_auto]],
             [rumps.MenuItem("Language"), [self._lang_es, self._lang_en, self._lang_auto]],
             self._usage_item,
@@ -519,64 +531,73 @@ class AutoWhisperApp(rumps.App):
 
     _processing_lock = threading.Lock()
 
-    def _process_selection(self, action: str):
-        """Capture selected text and process it (summarize/read/explain)."""
+    def _process_selection(self, action: str, use_hotkey: bool = False):
+        """
+        Process text: summarize/read/explain.
+        use_hotkey=True: simulate Cmd+C to capture selection (from hotkey)
+        use_hotkey=False: read clipboard as-is (from menu, focus already lost)
+        """
         if not self._processing_lock.acquire(blocking=False):
+            # If speaking, stop it and release lock
+            from voice_agent import is_speaking, stop_speaking
+            if is_speaking():
+                stop_speaking()
             logger.info(f"Already processing, ignoring {action}")
             return
 
         def _do():
             try:
-                text = capture_selected_text()
+                # 1. Get text
+                if use_hotkey:
+                    text = capture_selected_text()
+                else:
+                    board = NSPasteboard.generalPasteboard()
+                    text = board.stringForType_(NSPasteboardTypeString)
+
                 if not text or not text.strip():
-                    self._set_ui(self.ICON_IDLE, "No text selected")
+                    self._set_ui(self.ICON_IDLE, "No text — copy first (⌘C)")
                     play_sound("Basso")
                     return
 
                 text = text.strip()
                 logger.info(f"[{action}] Processing {len(text)} chars...")
 
+                # 2. Process based on action
                 if action == "read":
-                    self._set_ui(self.ICON_SPEAKING, "Reading...")
-                    from voice_agent import speak
-                    speak(text)
-                    self._set_ui(self.ICON_IDLE, "Done")
-                    return
-
-                # Summarize or explain via Groq LLM
-                self._set_ui(self.ICON_PROCESSING, f"{action.capitalize()}...")
-                play_sound("Glass")
-
-                from text_processor import summarize, explain, notify
-                if action == "summarize":
-                    voice_text, data_text = summarize(text)
+                    voice_text = text
                 else:
-                    voice_text, data_text = explain(text)
+                    self._set_ui(self.ICON_PROCESSING, f"{action.capitalize()}...")
+                    play_sound("Glass")
+                    from text_processor import summarize, explain
+                    voice_text = summarize(text) if action == "summarize" else explain(text)
 
                 if not voice_text:
                     self._set_ui(self.ICON_IDLE, "Processing failed")
                     return
 
-                if data_text:
-                    notify("auto-whisper", data_text)
-
-                self._set_ui(self.ICON_SPEAKING, f"{action.capitalize()}...")
-                from voice_agent import speak
-                speak(voice_text)
-                self._set_ui(self.ICON_IDLE, "Done")
+                # 3. Speak (release lock first so stop works)
+                self._set_ui(self.ICON_SPEAKING, f"Speaking...")
             finally:
                 self._processing_lock.release()
+
+            # Speaking happens outside the lock — can be stopped anytime
+            from voice_agent import speak
+            speak(voice_text)
+            self._set_ui(self.ICON_IDLE, "Done")
 
         threading.Thread(target=_do, daemon=True).start()
 
     def _menu_summarize(self, _):
-        self._process_selection("summarize")
+        logger.info("Menu: Summarize clipboard")
+        self._process_selection("summarize", use_hotkey=False)
 
     def _menu_read(self, _):
-        self._process_selection("read")
+        logger.info("Menu: Read clipboard")
+        self._process_selection("read", use_hotkey=False)
 
     def _menu_explain(self, _):
-        self._process_selection("explain")
+        logger.info("Menu: Explain clipboard")
+        self._process_selection("explain", use_hotkey=False)
 
     # --- Hotkeys ---
 
@@ -613,7 +634,7 @@ class AutoWhisperApp(rumps.App):
                             else:
                                 logger.info("Double-tap Left ⌘ → summarize")
                                 play_sound("Tink")
-                                self._process_selection("summarize")
+                                self._process_selection("summarize", use_hotkey=True)
                             self._last_lcmd_time = 0
                         else:
                             self._last_lcmd_time = now
