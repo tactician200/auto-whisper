@@ -16,6 +16,7 @@ Usage:
 
 import asyncio
 import logging
+import os
 import subprocess
 import tempfile
 import threading
@@ -146,7 +147,9 @@ def speak(text: str, backend: str = DEFAULT_BACKEND, voice: str | None = None,
         text = _apply_ssml_markers(text)
 
     suffix = ".aiff" if backend == "macos" else ".mp3"
-    tmp = Path(tempfile.mktemp(suffix=suffix))
+    fd, tmp_name = tempfile.mkstemp(suffix=suffix)
+    os.close(fd)
+    tmp = Path(tmp_name)
 
     try:
         if backend == "google":
@@ -177,7 +180,9 @@ def speak(text: str, backend: str = DEFAULT_BACKEND, voice: str | None = None,
     cmd = ["afplay", str(tmp)]
 
     with _playback_lock:
-        stop_speaking()  # kill any previous playback
+        # Kill any previous playback (inline to avoid deadlock)
+        if _current_playback and _current_playback.poll() is None:
+            _current_playback.terminate()
         proc = subprocess.Popen(cmd)
         _current_playback = proc
 

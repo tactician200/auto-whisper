@@ -58,11 +58,12 @@ def main():
         sys.exit(1)
 
     if split_mode:
-        from split_output import split_response
-        voice_text, display_text = split_response(text)
-        print(display_text)
+        from text_processor import summarize
+        voice_text, data_text = summarize(text)
+        if data_text:
+            print(data_text)
         print("\n--- Speaking ---")
-        speak(voice_text, backend=backend)
+        speak(voice_text or text, backend=backend)
     else:
         speak(text, backend=backend)
 

@@ -37,19 +37,29 @@ TEXTO:
 {text}"""
 
 
+_groq_client = None
+
+
+def _get_groq_client():
+    global _groq_client
+    if _groq_client is None:
+        from groq import Groq
+        _groq_client = Groq(api_key=GROQ_API_KEY_DICTATION)
+    return _groq_client
+
+
 def _call_groq(prompt: str) -> str | None:
     """Call Groq LLM (Llama 3.3 70B) for text processing."""
     if not GROQ_API_KEY_DICTATION:
         logger.error("No Groq API key configured")
         return None
     try:
-        from groq import Groq
-        client = Groq(api_key=GROQ_API_KEY_DICTATION)
+        client = _get_groq_client()
         response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
-            max_completion_tokens=500,
+            max_completion_tokens=1000,
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
@@ -67,6 +77,9 @@ def split_voice_data(text: str) -> tuple[str, str | None]:
     # Clean up double spaces/newlines from removed data tags
     voice_text = re.sub(r'\n{3,}', '\n\n', voice_text)
     voice_text = re.sub(r'  +', ' ', voice_text)
+
+    # Clean any dangling/unclosed tags from truncated LLM output
+    voice_text = re.sub(r'\[/?(?:DATA|E|P)\]', '', voice_text).strip()
 
     data_text = "\n".join(d.strip() for d in data_parts) if data_parts else None
     return voice_text, data_text

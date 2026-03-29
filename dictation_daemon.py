@@ -417,7 +417,7 @@ def _clean_transcription(text: str) -> str:
         "Gracias por ver el vídeo",
         "¡Suscríbete al canal!",
         "Hola, buenos días.",
-        "www.", "http",
+        "www.",
     ]
     for h in hallucinations:
         if h.lower() in text.lower():
@@ -517,52 +517,55 @@ class AutoWhisperApp(rumps.App):
 
     # --- Text processing actions ---
 
+    _processing_lock = threading.Lock()
+
     def _process_selection(self, action: str):
         """Capture selected text and process it (summarize/read/explain)."""
+        if not self._processing_lock.acquire(blocking=False):
+            logger.info(f"Already processing, ignoring {action}")
+            return
+
         def _do():
-            text = capture_selected_text()
-            if not text:
-                # Fallback: try clipboard as-is
-                board = NSPasteboard.generalPasteboard()
-                text = board.stringForType_(NSPasteboardTypeString)
+            try:
+                text = capture_selected_text()
+                if not text or not text.strip():
+                    self._set_ui(self.ICON_IDLE, "No text selected")
+                    play_sound("Basso")
+                    return
 
-            if not text or not text.strip():
-                self._set_ui(self.ICON_IDLE, "No text selected")
-                return
+                text = text.strip()
+                logger.info(f"[{action}] Processing {len(text)} chars...")
 
-            text = text.strip()
-            logger.info(f"[{action}] Processing {len(text)} chars...")
+                if action == "read":
+                    self._set_ui(self.ICON_SPEAKING, "Reading...")
+                    from voice_agent import speak
+                    speak(text)
+                    self._set_ui(self.ICON_IDLE, "Done")
+                    return
 
-            if action == "read":
-                self._set_ui(self.ICON_SPEAKING, "Reading...")
+                # Summarize or explain via Groq LLM
+                self._set_ui(self.ICON_PROCESSING, f"{action.capitalize()}...")
+                play_sound("Glass")
+
+                from text_processor import summarize, explain, notify
+                if action == "summarize":
+                    voice_text, data_text = summarize(text)
+                else:
+                    voice_text, data_text = explain(text)
+
+                if not voice_text:
+                    self._set_ui(self.ICON_IDLE, "Processing failed")
+                    return
+
+                if data_text:
+                    notify("auto-whisper", data_text)
+
+                self._set_ui(self.ICON_SPEAKING, f"{action.capitalize()}...")
                 from voice_agent import speak
-                speak(text)
+                speak(voice_text)
                 self._set_ui(self.ICON_IDLE, "Done")
-                return
-
-            # Summarize or explain via Groq LLM
-            self._set_ui(self.ICON_PROCESSING, f"{action.capitalize()}...")
-            play_sound("Glass")
-
-            from text_processor import summarize, explain, notify
-            if action == "summarize":
-                voice_text, data_text = summarize(text)
-            else:
-                voice_text, data_text = explain(text)
-
-            if not voice_text:
-                self._set_ui(self.ICON_IDLE, "Processing failed")
-                return
-
-            # Show data as notification
-            if data_text:
-                notify("auto-whisper", data_text)
-
-            # Speak the narrative
-            self._set_ui(self.ICON_SPEAKING, f"{action.capitalize()}...")
-            from voice_agent import speak
-            speak(voice_text)
-            self._set_ui(self.ICON_IDLE, "Done")
+            finally:
+                self._processing_lock.release()
 
         threading.Thread(target=_do, daemon=True).start()
 
@@ -598,7 +601,7 @@ class AutoWhisperApp(rumps.App):
 
                 # Left ⌘ — summarize selection (or stop if speaking)
                 elif kc == LEFT_CMD_KEYCODE:
-                    lcmd_down = bool(flags & (1 << 3))  # NX_DEVICELCMDKEYMASK
+                    lcmd_down = bool(flags & kCGEventFlagMaskCommand)
                     if lcmd_down and not self._lcmd_was_down:
                         now = time.time()
                         if now - self._last_lcmd_time < DOUBLE_TAP_WINDOW:
@@ -609,6 +612,7 @@ class AutoWhisperApp(rumps.App):
                                 self._set_ui(self.ICON_IDLE, "Stopped")
                             else:
                                 logger.info("Double-tap Left ⌘ → summarize")
+                                play_sound("Tink")
                                 self._process_selection("summarize")
                             self._last_lcmd_time = 0
                         else:
@@ -691,7 +695,7 @@ class AutoWhisperApp(rumps.App):
         play_sound("Pop")  # pop on stop
         engine_label = "groq" if self._mode != MODE_LOCAL else "local"
         self._set_ui(self.ICON_PROCESSING, f"Transcribing ({engine_label})...")
-        logger.info(f"Recording stopped. {len(self.audio_frames)} chunks captured")
+        logger.info(f"Recording stopped. {len(frames_copy)} chunks captured")
 
         def process():
             audio = np.concatenate(frames_copy, axis=0).flatten()
