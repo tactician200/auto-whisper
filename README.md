@@ -52,11 +52,13 @@ Only 2 permissions needed:
 ◎ click:
 ├── Dictate (⌘⌘)
 ├── Organize ideas
-├── Paste last
+├── Summarize (⌘⌘←)
+├── Read clipboard
+├── Explain clipboard
 ├── Engine ▸ Cloud (Groq) / Local / Auto
 ├── Language ▸ Español / English / Auto-detect
-├── Usage: ░░░░░░░░░░ 0/480min (0%)
-├── Status: idle
+├── ▓░░░░░░░░░ 5/480min (1%)
+├── Cloud · ES
 └── Quit
 ```
 

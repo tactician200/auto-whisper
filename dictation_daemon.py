@@ -241,10 +241,13 @@ def inject_text(text: str, target_app=None):
                         logger.info(f"Paste shortcut sent ({len(text)} chars)")
                         break
 
-                if not paste_sent:
+                if paste_sent:
+                    play_sound("Tink")
+                else:
                     logger.warning("Paste shortcut may have missed the target app")
+                    play_sound("Basso")
             finally:
-                time.sleep(1.2)
+                time.sleep(0.3)
                 if old_content is not None:
                     board.clearContents()
                     board.setString_forType_(old_content, NSPasteboardTypeString)
@@ -562,21 +565,19 @@ class AutoWhisperApp(rumps.App):
         self._update_lang_checks()
 
         self._usage_item = rumps.MenuItem(usage_tracker.format_bar())
-        self._status_item = rumps.MenuItem("Status: idle")
+        self._status_item = rumps.MenuItem(self._format_status_line())
 
         # Build menu items with callbacks assigned explicitly
-        self._btn_dictate = rumps.MenuItem("Dictate (Right ⌘⌘)")
+        self._btn_dictate = rumps.MenuItem("Dictate (⌘⌘)")
         self._btn_dictate.set_callback(self._menu_toggle)
         self._btn_organize = rumps.MenuItem("Organize ideas")
         self._btn_organize.set_callback(self._menu_organize)
-        self._btn_summarize = rumps.MenuItem("Summarize clipboard")
+        self._btn_summarize = rumps.MenuItem("Summarize (⌘⌘←)")
         self._btn_summarize.set_callback(self._menu_summarize)
         self._btn_read = rumps.MenuItem("Read clipboard")
         self._btn_read.set_callback(self._menu_read)
         self._btn_explain = rumps.MenuItem("Explain clipboard")
         self._btn_explain.set_callback(self._menu_explain)
-        self._btn_paste = rumps.MenuItem("Paste last")
-        self._btn_paste.set_callback(self._paste_last)
 
         self.menu = [
             self._btn_dictate,
@@ -586,7 +587,6 @@ class AutoWhisperApp(rumps.App):
             self._btn_read,
             self._btn_explain,
             None,
-            self._btn_paste,
             [rumps.MenuItem("Engine"), [self._mode_cloud, self._mode_local, self._mode_auto]],
             [rumps.MenuItem("Language"), [self._lang_es, self._lang_en, self._lang_auto]],
             self._usage_item,
@@ -594,9 +594,15 @@ class AutoWhisperApp(rumps.App):
         ]
         self._setup_hotkey()
 
+    def _format_status_line(self):
+        engine_short = {"Cloud (Groq)": "Cloud", "Local": "Local", "Auto": "Auto"}.get(self._mode, self._mode)
+        lang_short = {"Español": "ES", "English": "EN", "Auto-detect": "Auto"}.get(self._language, "?")
+        return f"{engine_short} · {lang_short}"
+
     def _set_mode(self, sender):
         self._mode = sender.title
         self._update_mode_checks()
+        self._set_ui(self.title, self._format_status_line())
         logger.info(f"Mode changed to: {self._mode}")
 
     def _update_mode_checks(self):
@@ -607,6 +613,7 @@ class AutoWhisperApp(rumps.App):
     def _set_language(self, sender):
         self._language = sender.title
         self._update_lang_checks()
+        self._set_ui(self.title, self._format_status_line())
         logger.info(f"Language changed to: {self._language}")
 
     def _update_lang_checks(self):
@@ -877,8 +884,8 @@ class AutoWhisperApp(rumps.App):
                 logger.info(
                     f"Silent/noise only (peak chunk RMS: {peak_chunk_rms:.6f}), skipping"
                 )
-                play_sound("Funk")  # notify user it was too quiet
-                self._set_ui(self.ICON_IDLE, f"Too quiet (peak RMS: {peak_chunk_rms:.4f})")
+                play_sound("Funk")
+                self._set_ui(self.ICON_IDLE, "Too quiet — speak closer")
                 return
 
             lang_code = LANG_MAP.get(self._language, "es")
@@ -892,7 +899,7 @@ class AutoWhisperApp(rumps.App):
                         f"Short low-energy artifact-like transcript skipped: {text[:40]}..."
                     )
                     play_sound("Funk")
-                    self._set_ui(self.ICON_IDLE, "No speech detected")
+                    self._set_ui(self.ICON_IDLE, "Nothing heard")
                     return
 
                 logger.info(f"[{engine}] Transcribed: {text[:80]}...")
@@ -915,11 +922,12 @@ class AutoWhisperApp(rumps.App):
 
                 self._last_transcription = output_text
                 inject_text(output_text, target_app=self._target_app)
-                status_prefix = "Ideas organized" if recording_mode == RECORDING_MODE_ORGANIZE else "OK"
-                self._set_ui(self.ICON_IDLE, f"{status_prefix} ({engine}): {output_text[:30]}...")
+                engine_label_short = "cloud" if "groq" in engine else "local"
+                status_prefix = "Organized" if recording_mode == RECORDING_MODE_ORGANIZE else "Pasted"
+                self._set_ui(self.ICON_IDLE, f"✓ {status_prefix} ({engine_label_short})")
             else:
                 logger.warning("Transcription returned empty")
-                self._set_ui(self.ICON_IDLE, "No speech detected")
+                self._set_ui(self.ICON_IDLE, "Nothing heard")
 
         threading.Thread(target=process, daemon=True).start()
 
@@ -928,7 +936,7 @@ class AutoWhisperApp(rumps.App):
         def _update():
             self.title = icon
             try:
-                self._status_item.title = f"Status: {status}"
+                self._status_item.title = status
                 self._usage_item.title = usage_tracker.format_bar()
             except Exception:
                 pass
