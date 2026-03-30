@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Text processing module — summarize and explain via Groq LLM.
+Text processing module — summarize, explain, and organize spoken ideas via Groq LLM.
 """
 
 import logging
@@ -9,15 +9,9 @@ from shared.config import GROQ_API_KEY_DICTATION
 
 logger = logging.getLogger(__name__)
 
-PROMPT_SUMMARIZE = """Eres un asistente ejecutivo. Comunica la esencia de este texto como lo haría \
-un profesional en una conversación breve.
-
-Reglas:
-- Prioriza decisiones, acciones requeridas y conclusiones
-- Omite contexto obvio y relleno
-- Habla en español, directo y natural
-- No uses muletillas como "en resumen", "básicamente", "cabe destacar"
-- Escribe como si fueras a leerlo en voz alta — fluido y claro
+PROMPT_SUMMARIZE = """Di la esencia de este texto en 2-3 frases cortas. Solo lo que importa. \
+Nada de contexto, introducción ni explicaciones. Como un titular expandido.
+Español, directo, sin muletillas.
 
 TEXTO:
 {text}"""
@@ -31,6 +25,21 @@ Reglas:
 - Escribe como si fueras a leerlo en voz alta — fluido y conversacional
 
 TEXTO:
+{text}"""
+
+PROMPT_ORGANIZE_IDEAS = """Convierte esta dictación en un texto claro, ordenado y listo para pegar.
+
+Reglas:
+- Mantén el significado original. No inventes hechos ni detalles.
+- Limpia muletillas, repeticiones, frases a medio cerrar y ruido verbal.
+- Ordena las ideas de forma lógica.
+- Si hay varios puntos, usa viñetas.
+- Si hay pasos o acciones, usa una lista numerada.
+- Si el contenido ya está bastante claro, solo mejora redacción y estructura.
+- Escribe en español claro, directo y útil.
+- Devuelve solo el resultado final.
+
+DICTACIÓN:
 {text}"""
 
 
@@ -74,6 +83,11 @@ def summarize(text: str) -> str | None:
 def explain(text: str) -> str | None:
     """Explain text. Returns voice-ready text."""
     return _call_groq(PROMPT_EXPLAIN.format(text=text[:4000]))
+
+
+def organize_ideas(text: str) -> str | None:
+    """Turn rough dictated ideas into organized notes ready to paste."""
+    return _call_groq(PROMPT_ORGANIZE_IDEAS.format(text=text[:4000]))
 
 
 def notify(title: str, message: str):

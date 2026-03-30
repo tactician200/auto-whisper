@@ -441,9 +441,13 @@ def process_inbox():
             logger.error(f"Error processing {audio_file.name}: {e}", exc_info=True)
 
 
-if __name__ == "__main__":
+def main():
     logger.info("=== Meeting Transcriber v2 started ===")
     engine = "groq" if GROQ_API_KEY_MEETINGS else "local"
     logger.info(f"Engine: {engine}")
     process_inbox()
     logger.info("=== Meeting Transcriber v2 finished ===")
+
+
+if __name__ == "__main__":
+    main()

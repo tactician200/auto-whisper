@@ -8,7 +8,8 @@ macOS menu bar dictation app. Speak, and text appears at your cursor.
 
 ## Features
 
-- Double-tap Right ⌘ to start/stop recording
+- Double-tap Right ⌘ to start/stop dictation
+- Organize ideas: record via menu, AI cleans and structures before pasting
 - Audio feedback (beep on start/stop)
 - Multi-language: Spanish, English, Auto-detect
 - Usage tracker for Groq free tier (8hrs/day)
@@ -49,7 +50,8 @@ Only 2 permissions needed:
 ◎ (idle) → ◠ (starting) → ◉ (recording) → ⟳ (processing)
 
 ◎ click:
-├── Toggle (⌘⌘)
+├── Dictate (⌘⌘)
+├── Organize ideas
 ├── Paste last
 ├── Engine ▸ Cloud (Groq) / Local / Auto
 ├── Language ▸ Español / English / Auto-detect
@@ -72,7 +74,7 @@ tail -f ~/MeetingTranscripts/logs/dictation.log
 nano ~/auto-whisper/.env
 ```
 
-## Meeting Transcriber
+## MeetingsIntel
 
 Separate feature: drop audio files into `~/MeetingInbox/` and get structured meeting notes with AI analysis (summaries, action items, decisions) powered by Gemini.
 
@@ -80,6 +82,39 @@ Separate feature: drop audio files into `~/MeetingInbox/` and get structured mee
 cp recording.wav ~/MeetingInbox/
 # → Note appears in ~/MeetingTranscripts/notes/
 ```
+
+### Remote Meetings: Zoom / Google Meet
+
+For remote meetings, the most practical universal setup is:
+
+1. Route meeting audio with `BlackHole 2ch`
+2. Record it in your preferred app
+3. Send the resulting file to `~/MeetingInbox`
+
+This repo includes a MeetingsIntel importer helper:
+
+```bash
+bash ~/src/meeting-transcriber/send_to_meetings_intel.sh "/path/to/recording.m4a"
+```
+
+That copies the file into `~/MeetingInbox` and nudges the watcher so transcription starts right away.
+
+#### Send to MeetingsIntel
+
+`AutoWhisper` stays focused on dictation/reading. `MeetingsIntel` handles imported meeting recordings.
+
+The repo now includes two simple entry surfaces for imports:
+
+1. [`Send to MeetingsIntel.app`](/Users/mantra/Applications/Send%20to%20MeetingsIntel.app)
+   Drag one or more meeting recordings onto the app.
+2. Finder Quick Action
+   Use `Send to MeetingsIntel` from Finder on selected files.
+
+```bash
+bash ~/src/meeting-transcriber/send_to_meetings_intel.sh "$@"
+```
+
+That gives you near one-click import into the transcription + meeting-intelligence pipeline without building a native Share Extension.
 
 ## License
 

@@ -20,6 +20,7 @@ import tempfile
 import shutil
 import wave
 import io
+import unicodedata
 import numpy as np
 import sounddevice as sd
 import rumps
@@ -30,8 +31,7 @@ os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 from pathlib import Path
 from AppKit import (
     NSEvent, NSFlagsChangedMask, NSWorkspace,
-    NSPasteboard, NSPasteboardTypeString,
-    NSSound,
+    NSPasteboard, NSPasteboardTypeString, NSApplication,
 )
 from Quartz import (
     CGEventCreateKeyboardEvent, CGEventSetFlags, CGEventPost,
@@ -63,9 +63,15 @@ C_KEYCODE = 8
 # No sentence prompt — only vocabulary hints to avoid hallucination on long audio
 WHISPER_PROMPT = None
 MAX_RECORDING_SECONDS = 300  # 5 min auto-stop guard
+SILENCE_AUTOSTOP_SECONDS = 5.0  # auto-stop after N seconds of silence
+SILENCE_RMS_THRESHOLD = 0.008  # below this RMS = silence
+SOUND_START_DICTATE = "Glass"
+SOUND_START_ORGANIZE = "Hero"
+SOUND_STOP_RECORDING = "Pop"
 
 # Lazy-init Groq client (reuse connection pool)
 _groq_client = None
+_injection_lock = threading.Lock()
 
 
 def _get_groq_client():
@@ -80,6 +86,9 @@ MODE_AUTO = "Auto"
 MODE_CLOUD = "Cloud (Groq)"
 MODE_LOCAL = "Local"
 
+RECORDING_MODE_DICTATE = "dictate"
+RECORDING_MODE_ORGANIZE = "organize"
+
 # Language modes
 LANG_AUTO = "Auto-detect"
 LANG_ES = "Español"
@@ -90,12 +99,16 @@ LANG_MAP = {LANG_AUTO: None, LANG_ES: "es", LANG_EN: "en"}
 # --- Sound feedback ---
 
 def play_sound(name: str):
-    """Play macOS system sound (non-blocking)."""
-    sound = NSSound.alloc().initWithContentsOfFile_byReference_(
-        f"/System/Library/Sounds/{name}.aiff", True
-    )
-    if sound:
-        sound.play()
+    """Play macOS system sound (thread-safe, non-blocking)."""
+    sound_path = f"/System/Library/Sounds/{name}.aiff"
+    try:
+        subprocess.Popen(
+            ["/usr/bin/afplay", sound_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as e:
+        logger.warning(f"Failed to play sound '{name}': {e}")
 
 
 # --- Internet check ---
@@ -144,24 +157,47 @@ def restore_focus(app):
 
 def capture_selected_text() -> str | None:
     """Simulate Cmd+C and read clipboard. Returns selected text or None."""
-    board = NSPasteboard.generalPasteboard()
-    old_count = board.changeCount()
+    with _injection_lock:
+        board = NSPasteboard.generalPasteboard()
+        old_count = board.changeCount()
+        old_content = board.stringForType_(NSPasteboardTypeString)
 
-    # Simulate Cmd+C
-    c_down = CGEventCreateKeyboardEvent(None, C_KEYCODE, True)
-    c_up = CGEventCreateKeyboardEvent(None, C_KEYCODE, False)
-    CGEventSetFlags(c_down, kCGEventFlagMaskCommand)
-    CGEventSetFlags(c_up, kCGEventFlagMaskCommand)
-    CGEventPost(kCGHIDEventTap, c_down)
-    CGEventPost(kCGHIDEventTap, c_up)
-    time.sleep(0.15)
+        try:
+            # Simulate Cmd+C
+            c_down = CGEventCreateKeyboardEvent(None, C_KEYCODE, True)
+            c_up = CGEventCreateKeyboardEvent(None, C_KEYCODE, False)
+            CGEventSetFlags(c_down, kCGEventFlagMaskCommand)
+            CGEventSetFlags(c_up, kCGEventFlagMaskCommand)
+            CGEventPost(kCGHIDEventTap, c_down)
+            CGEventPost(kCGHIDEventTap, c_up)
+            time.sleep(0.15)
 
-    # Check if clipboard changed
-    if board.changeCount() == old_count:
-        return None
+            # Check if clipboard changed
+            if board.changeCount() == old_count:
+                return None
 
-    text = board.stringForType_(NSPasteboardTypeString)
-    return text.strip() if text else None
+            text = board.stringForType_(NSPasteboardTypeString)
+            return text.strip() if text else None
+        finally:
+            # Preserve the user's clipboard when capture is triggered by a hotkey.
+            if old_content is not None and board.changeCount() != old_count:
+                time.sleep(0.05)
+                board.clearContents()
+                board.setString_forType_(old_content, NSPasteboardTypeString)
+
+
+def _wait_for_frontmost_app(app, timeout: float = 1.0) -> bool:
+    """Wait briefly until the requested app is frontmost."""
+    if not app:
+        return True
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        current = NSWorkspace.sharedWorkspace().frontmostApplication()
+        if current and current.processIdentifier() == app.processIdentifier():
+            return True
+        time.sleep(0.05)
+    return False
 
 
 # --- Text injection ---
@@ -172,30 +208,46 @@ def inject_text(text: str, target_app=None):
     text = text.strip()
 
     def _do_inject():
-        board = NSPasteboard.generalPasteboard()
-        old_content = board.stringForType_(NSPasteboardTypeString)
-        try:
-            if target_app:
-                restore_focus(target_app)
+        with _injection_lock:
+            board = NSPasteboard.generalPasteboard()
+            old_content = board.stringForType_(NSPasteboardTypeString)
+            try:
+                paste_sent = False
+                for attempt in range(3):
+                    if target_app:
+                        restore_focus(target_app)
+                        if not _wait_for_frontmost_app(target_app, timeout=0.8):
+                            logger.warning(
+                                f"Target app did not regain focus before paste attempt {attempt + 1}"
+                            )
 
-            board.clearContents()
-            board.setString_forType_(text, NSPasteboardTypeString)
-            time.sleep(0.05)
+                    board.clearContents()
+                    board.setString_forType_(text, NSPasteboardTypeString)
+                    time.sleep(0.08)
 
-            event_down = CGEventCreateKeyboardEvent(None, V_KEYCODE, True)
-            event_up = CGEventCreateKeyboardEvent(None, V_KEYCODE, False)
-            CGEventSetFlags(event_down, kCGEventFlagMaskCommand)
-            CGEventSetFlags(event_up, kCGEventFlagMaskCommand)
-            CGEventPost(kCGHIDEventTap, event_down)
-            CGEventPost(kCGHIDEventTap, event_up)
-            time.sleep(0.2)
+                    event_down = CGEventCreateKeyboardEvent(None, V_KEYCODE, True)
+                    event_up = CGEventCreateKeyboardEvent(None, V_KEYCODE, False)
+                    CGEventSetFlags(event_down, kCGEventFlagMaskCommand)
+                    CGEventSetFlags(event_up, kCGEventFlagMaskCommand)
+                    CGEventPost(kCGHIDEventTap, event_down)
+                    CGEventPost(kCGHIDEventTap, event_up)
+                    time.sleep(0.18 + attempt * 0.08)
 
-            logger.info(f"Pasted {len(text)} chars")
-        finally:
-            time.sleep(1.0)
-            if old_content is not None:
-                board.clearContents()
-                board.setString_forType_(old_content, NSPasteboardTypeString)
+                    current = NSWorkspace.sharedWorkspace().frontmostApplication()
+                    if not target_app or (
+                        current and current.processIdentifier() == target_app.processIdentifier()
+                    ):
+                        paste_sent = True
+                        logger.info(f"Paste shortcut sent ({len(text)} chars)")
+                        break
+
+                if not paste_sent:
+                    logger.warning("Paste shortcut may have missed the target app")
+            finally:
+                time.sleep(1.2)
+                if old_content is not None:
+                    board.clearContents()
+                    board.setString_forType_(old_content, NSPasteboardTypeString)
 
     threading.Thread(target=_do_inject, daemon=True).start()
 
@@ -298,6 +350,7 @@ class UsageTracker:
     DAILY_REQUEST_LIMIT = 2000
 
     def __init__(self):
+        self._lock = threading.Lock()
         self._date = None
         self.audio_seconds = 0.0
         self.requests = 0
@@ -312,25 +365,30 @@ class UsageTracker:
             self.requests = 0
 
     def record(self, audio_duration: float):
-        self._reset_if_new_day()
-        self.audio_seconds += audio_duration
-        self.requests += 1
+        with self._lock:
+            self._reset_if_new_day()
+            self.audio_seconds += audio_duration
+            self.requests += 1
 
     @property
     def audio_pct(self) -> float:
-        self._reset_if_new_day()
-        return min(self.audio_seconds / self.DAILY_AUDIO_LIMIT * 100, 100)
+        with self._lock:
+            self._reset_if_new_day()
+            return min(self.audio_seconds / self.DAILY_AUDIO_LIMIT * 100, 100)
 
     @property
     def remaining_minutes(self) -> float:
-        self._reset_if_new_day()
-        return max((self.DAILY_AUDIO_LIMIT - self.audio_seconds) / 60, 0)
+        with self._lock:
+            self._reset_if_new_day()
+            return max((self.DAILY_AUDIO_LIMIT - self.audio_seconds) / 60, 0)
 
     def format_bar(self) -> str:
         """Return a compact usage bar for the menu."""
-        pct = self.audio_pct
-        used_min = self.audio_seconds / 60
-        total_min = self.DAILY_AUDIO_LIMIT / 60
+        with self._lock:
+            self._reset_if_new_day()
+            pct = min(self.audio_seconds / self.DAILY_AUDIO_LIMIT * 100, 100)
+            used_min = self.audio_seconds / 60
+            total_min = self.DAILY_AUDIO_LIMIT / 60
         blocks = int(pct / 10)
         bar = "▓" * blocks + "░" * (10 - blocks)
         return f"Usage: {bar} {used_min:.0f}/{total_min:.0f}min ({pct:.0f}%)"
@@ -411,21 +469,48 @@ def transcribe_audio(audio_data: np.ndarray, mode: str, language: str | None = "
 
 
 def _clean_transcription(text: str) -> str:
-    hallucinations = [
-        "Subtítulos realizados por la comunidad de Amara.org",
-        "Subtítulos por la comunidad de Amara.org",
-        "Gracias por ver el vídeo",
-        "¡Suscríbete al canal!",
-        "Hola, buenos días.",
-        "www.",
-    ]
-    for h in hallucinations:
-        if h.lower() in text.lower():
-            return ""
     text = text.strip(" \n\t-–—")
     while "  " in text:
         text = text.replace("  ", " ")
+
+    normalized = _normalize_text(text)
+    if not normalized:
+        return ""
+
+    exact_artifacts = {
+        "subtitulos realizados por la comunidad de amara org",
+        "subtitulos por la comunidad de amara org",
+        "gracias por ver el video",
+        "suscribete al canal",
+        "hola buenos dias",
+    }
+    if normalized in exact_artifacts:
+        return ""
     return text
+
+
+def _normalize_text(text: str) -> str:
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = text.lower().strip()
+    text = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in text)
+    return " ".join(text.split())
+
+
+def _looks_like_spurious_short_transcript(text: str, duration: float, rms: float) -> bool:
+    normalized = _normalize_text(text)
+    suspicious_short_outputs = {
+        "gracias",
+        "muchas gracias",
+        "gracias gracias",
+        "hola",
+        "hola buenos dias",
+    }
+    if normalized not in suspicious_short_outputs:
+        return False
+
+    word_count = len(normalized.split())
+    return duration <= 2.5 and rms < 0.0065 and word_count <= 3
 
 
 # --- Menu bar app ---
@@ -439,6 +524,8 @@ class AutoWhisperApp(rumps.App):
 
     def __init__(self):
         super().__init__("auto-whisper", quit_button="Quit")
+        # Force accessory/menu-bar behavior even when launched directly via python.
+        NSApplication.sharedApplication().setActivationPolicy_(1)
         self.recording = False
         self.audio_frames = []
         self._frames_lock = threading.Lock()
@@ -453,6 +540,10 @@ class AutoWhisperApp(rumps.App):
         self._lcmd_was_down = False
         self._last_transcription = None
         self._speaking_process = None
+        self._last_voice_time = time.time()
+        self._silence_stop_fired = False
+        self._max_duration_stop_fired = False
+        self._recording_mode = RECORDING_MODE_DICTATE
 
         # Default mode
         self._mode = MODE_CLOUD if GROQ_API_KEY_DICTATION else MODE_LOCAL
@@ -476,6 +567,8 @@ class AutoWhisperApp(rumps.App):
         # Build menu items with callbacks assigned explicitly
         self._btn_dictate = rumps.MenuItem("Dictate (Right ⌘⌘)")
         self._btn_dictate.set_callback(self._menu_toggle)
+        self._btn_organize = rumps.MenuItem("Organize ideas")
+        self._btn_organize.set_callback(self._menu_organize)
         self._btn_summarize = rumps.MenuItem("Summarize clipboard")
         self._btn_summarize.set_callback(self._menu_summarize)
         self._btn_read = rumps.MenuItem("Read clipboard")
@@ -487,6 +580,7 @@ class AutoWhisperApp(rumps.App):
 
         self.menu = [
             self._btn_dictate,
+            self._btn_organize,
             None,
             self._btn_summarize,
             self._btn_read,
@@ -581,15 +675,21 @@ class AutoWhisperApp(rumps.App):
                 self._processing_lock.release()
 
             # Speaking happens outside the lock — can be stopped anytime
-            from voice_agent import speak
-            speak(voice_text)
-            self._set_ui(self.ICON_IDLE, "Done")
+            try:
+                from voice_agent import speak
+                speak(voice_text)
+            finally:
+                self._set_ui(self.ICON_IDLE, "Done")
 
         threading.Thread(target=_do, daemon=True).start()
 
     def _menu_summarize(self, _):
         logger.info("Menu: Summarize clipboard")
         self._process_selection("summarize", use_hotkey=False)
+
+    def _menu_organize(self, _):
+        logger.info("Menu: Organize ideas")
+        self._toggle_recording(RECORDING_MODE_ORGANIZE)
 
     def _menu_read(self, _):
         logger.info("Menu: Read clipboard")
@@ -614,7 +714,7 @@ class AutoWhisperApp(rumps.App):
                         now = time.time()
                         if now - self._last_rcmd_time < DOUBLE_TAP_WINDOW:
                             logger.info("Double-tap Right ⌘ → dictation")
-                            self._on_hotkey()
+                            self._toggle_recording()
                             self._last_rcmd_time = 0
                         else:
                             self._last_rcmd_time = now
@@ -648,23 +748,35 @@ class AutoWhisperApp(rumps.App):
         )
         logger.info("Hotkeys: Right ⌘⌘ = dictate, Left ⌘⌘ = summarize")
 
-    def _on_hotkey(self):
+    def _toggle_recording(self, recording_mode: str = RECORDING_MODE_DICTATE):
         if self.recording:
             self._stop_and_transcribe()
         else:
-            self._start_recording()
+            self._start_recording(recording_mode)
 
-    def _start_recording(self):
+    def _start_recording(self, recording_mode: str = RECORDING_MODE_DICTATE):
         if self.recording:
             return
-        self.recording = True
+        self._recording_mode = recording_mode
         with self._frames_lock:
             self.audio_frames = []
-        self._record_start_time = time.time()
+        now = time.time()
+        self._record_start_time = None
+        self._last_voice_time = now
+        self._silence_stop_fired = False
+        self._max_duration_stop_fired = False
+        self.recording = True
         self._target_app = get_frontmost_app()
-        self._set_ui(self.ICON_STARTING, "Starting mic...")
+        start_label = "Starting mic..." if recording_mode == RECORDING_MODE_DICTATE else "Starting organizer..."
+        self._set_ui(self.ICON_STARTING, start_label)
         target_name = self._target_app.localizedName() if self._target_app else "unknown"
-        logger.info(f"Initializing mic... (target: {target_name}, mode: {self._mode})")
+        start_sound = SOUND_START_ORGANIZE if recording_mode == RECORDING_MODE_ORGANIZE else SOUND_START_DICTATE
+        # Play the cue immediately so the user gets confirmation even if the
+        # input stream takes a moment to initialize.
+        play_sound(start_sound)
+        logger.info(
+            f"Initializing mic... (target: {target_name}, mode: {self._mode}, action: {recording_mode})"
+        )
 
         def record():
             try:
@@ -673,10 +785,13 @@ class AutoWhisperApp(rumps.App):
                     dtype="float32", blocksize=FRAMES_PER_BUFFER,
                     callback=self._audio_callback,
                 )
+                started_at = time.time()
+                self._record_start_time = started_at
+                self._last_voice_time = started_at
                 self.stream.start()
-                play_sound("Funk")  # beep on start
-                self._set_ui(self.ICON_RECORDING, "Recording...")
-                logger.info("Recording started")
+                status = "Recording..." if recording_mode == RECORDING_MODE_DICTATE else "Recording ideas..."
+                self._set_ui(self.ICON_RECORDING, status)
+                logger.info(f"Recording started ({recording_mode})")
             except Exception as e:
                 logger.error(f"Failed to start recording: {e}")
                 self.recording = False
@@ -688,22 +803,51 @@ class AutoWhisperApp(rumps.App):
         if self.recording:
             with self._frames_lock:
                 self.audio_frames.append(indata.copy())
-            # Auto-stop guard
-            if self._record_start_time and (time.time() - self._record_start_time > MAX_RECORDING_SECONDS):
+
+            now = time.time()
+            rms = float(np.sqrt(np.mean(indata ** 2)))
+
+            # Track last non-silent audio
+            if rms >= SILENCE_RMS_THRESHOLD:
+                self._last_voice_time = now
+
+            # Auto-stop on prolonged silence (only after some speech was captured)
+            elapsed = now - self._record_start_time if self._record_start_time else 0
+            silence_duration = now - self._last_voice_time
+            if (elapsed > 2.0 and silence_duration >= SILENCE_AUTOSTOP_SECONDS
+                    and not self._silence_stop_fired):
+                self._silence_stop_fired = True
+                logger.info(f"Silence auto-stop after {silence_duration:.1f}s silence ({elapsed:.1f}s total)")
+                threading.Thread(target=self._stop_and_transcribe, daemon=True).start()
+                return
+
+            # Max duration guard — MUST run in separate thread to avoid deadlock
+            if (self._record_start_time and elapsed > MAX_RECORDING_SECONDS
+                    and not self._max_duration_stop_fired):
+                self._max_duration_stop_fired = True
                 logger.warning(f"Max recording duration ({MAX_RECORDING_SECONDS}s) reached, auto-stopping")
                 play_sound("Basso")
-                self._on_hotkey()
+                threading.Thread(target=self._stop_and_transcribe, daemon=True).start()
 
     def _stop_and_transcribe(self):
         self.recording = False
+        recording_mode = self._recording_mode
 
-        if self.stream:
-            try:
-                self.stream.stop()
-                self.stream.close()
-            except Exception as e:
-                logger.warning(f"Stream close error: {e}")
-            self.stream = None
+        # Stop stream with timeout to prevent main-thread freeze
+        stream = self.stream
+        self.stream = None
+        if stream:
+            def _close_stream():
+                try:
+                    stream.stop()
+                    stream.close()
+                except Exception as e:
+                    logger.warning(f"Stream close error: {e}")
+            closer = threading.Thread(target=_close_stream, daemon=True)
+            closer.start()
+            closer.join(timeout=3.0)
+            if closer.is_alive():
+                logger.warning("Stream close timed out (3s), continuing anyway")
 
         with self._frames_lock:
             frames_copy = list(self.audio_frames)
@@ -713,9 +857,10 @@ class AutoWhisperApp(rumps.App):
             self._set_ui(self.ICON_IDLE, "No audio captured")
             return
 
-        play_sound("Pop")  # pop on stop
+        play_sound(SOUND_STOP_RECORDING)
         engine_label = "groq" if self._mode != MODE_LOCAL else "local"
-        self._set_ui(self.ICON_PROCESSING, f"Transcribing ({engine_label})...")
+        action_label = "organizing" if recording_mode == RECORDING_MODE_ORGANIZE else "transcribing"
+        self._set_ui(self.ICON_PROCESSING, f"{action_label.capitalize()} ({engine_label})...")
         logger.info(f"Recording stopped. {len(frames_copy)} chunks captured")
 
         def process():
@@ -724,11 +869,16 @@ class AutoWhisperApp(rumps.App):
             logger.info(f"Audio duration: {duration:.1f}s")
 
             rms = np.sqrt(np.mean(audio ** 2))
-            logger.info(f"Audio RMS: {rms:.6f}")
-            if rms < 0.005:
-                logger.info(f"Silent/noise only (RMS: {rms:.6f}), skipping")
+            peak_chunk_rms = max(
+                float(np.sqrt(np.mean(chunk ** 2))) for chunk in frames_copy
+            )
+            logger.info(f"Audio RMS: {rms:.6f} (peak chunk RMS: {peak_chunk_rms:.6f})")
+            if peak_chunk_rms < SILENCE_RMS_THRESHOLD:
+                logger.info(
+                    f"Silent/noise only (peak chunk RMS: {peak_chunk_rms:.6f}), skipping"
+                )
                 play_sound("Funk")  # notify user it was too quiet
-                self._set_ui(self.ICON_IDLE, f"Too quiet (RMS: {rms:.4f})")
+                self._set_ui(self.ICON_IDLE, f"Too quiet (peak RMS: {peak_chunk_rms:.4f})")
                 return
 
             lang_code = LANG_MAP.get(self._language, "es")
@@ -737,10 +887,36 @@ class AutoWhisperApp(rumps.App):
             else:
                 text, engine = transcribe_audio(audio, self._mode, language=lang_code)
             if text:
+                if _looks_like_spurious_short_transcript(text, duration, peak_chunk_rms):
+                    logger.info(
+                        f"Short low-energy artifact-like transcript skipped: {text[:40]}..."
+                    )
+                    play_sound("Funk")
+                    self._set_ui(self.ICON_IDLE, "No speech detected")
+                    return
+
                 logger.info(f"[{engine}] Transcribed: {text[:80]}...")
-                self._last_transcription = text
-                inject_text(text, target_app=self._target_app)
-                self._set_ui(self.ICON_IDLE, f"OK ({engine}): {text[:30]}...")
+                output_text = text
+
+                if recording_mode == RECORDING_MODE_ORGANIZE:
+                    self._set_ui(self.ICON_PROCESSING, "Organizing ideas...")
+                    try:
+                        from text_processor import organize_ideas
+                        organized = organize_ideas(text)
+                    except Exception as e:
+                        logger.error(f"Idea organization failed: {e}")
+                        organized = None
+
+                    if organized and organized.strip():
+                        output_text = organized.strip()
+                        logger.info(f"Ideas organized: {output_text[:80]}...")
+                    else:
+                        logger.warning("Idea organization returned empty, falling back to raw transcript")
+
+                self._last_transcription = output_text
+                inject_text(output_text, target_app=self._target_app)
+                status_prefix = "Ideas organized" if recording_mode == RECORDING_MODE_ORGANIZE else "OK"
+                self._set_ui(self.ICON_IDLE, f"{status_prefix} ({engine}): {output_text[:30]}...")
             else:
                 logger.warning("Transcription returned empty")
                 self._set_ui(self.ICON_IDLE, "No speech detected")
@@ -759,7 +935,7 @@ class AutoWhisperApp(rumps.App):
         AppHelper.callAfter(_update)
 
     def _menu_toggle(self, _):
-        self._on_hotkey()
+        self._toggle_recording(RECORDING_MODE_DICTATE)
 
     @rumps.events.before_quit
     def _cleanup(self):
@@ -774,7 +950,7 @@ class AutoWhisperApp(rumps.App):
                 pass
 
 
-if __name__ == "__main__":
+def main():
     print("\n  auto-whisper v4.0")
     print("  ─────────────────")
 
@@ -822,3 +998,7 @@ if __name__ == "__main__":
     logger.info(f"Mode: {default_mode}, cloud={'groq' if GROQ_API_KEY_DICTATION else 'none'}, local={model_name}")
     app = AutoWhisperApp()
     app.run()
+
+
+if __name__ == "__main__":
+    main()

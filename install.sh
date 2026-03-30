@@ -22,6 +22,9 @@ LOGS_DIR="$HOME/MeetingTranscripts/logs"
 PLIST_LABEL="com.auto-whisper"
 PLIST_SRC="$INSTALL_DIR/$PLIST_LABEL.plist"
 PLIST_DST="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
+MEETING_PLIST_LABEL="com.meetingtranscriber"
+MEETING_PLIST_SRC="$INSTALL_DIR/$MEETING_PLIST_LABEL.plist"
+MEETING_PLIST_DST="$HOME/Library/LaunchAgents/$MEETING_PLIST_LABEL.plist"
 
 # ─── Check macOS ───
 if [[ "$(uname)" != "Darwin" ]]; then
@@ -56,6 +59,22 @@ if ! command -v ffmpeg &>/dev/null; then
     brew install ffmpeg
 fi
 echo "  ✓ ffmpeg"
+
+# ─── Optional: Install BlackHole for remote meetings ───
+if brew list --cask blackhole-2ch &>/dev/null; then
+    echo "  ✓ BlackHole 2ch"
+else
+    echo ""
+    read -p "  Install BlackHole 2ch for Zoom/Meet routing? [y/N] " INSTALL_BLACKHOLE
+    INSTALL_BLACKHOLE=${INSTALL_BLACKHOLE:-N}
+    if [[ "$INSTALL_BLACKHOLE" =~ ^[Yy] ]]; then
+        echo "  Installing BlackHole 2ch..."
+        brew install --cask blackhole-2ch
+        echo "  ✓ BlackHole 2ch installed"
+    else
+        echo "  ⚠ BlackHole skipped"
+    fi
+fi
 
 # ─── Create venv ───
 if [[ ! -d "$VENV_DIR" ]]; then
@@ -149,7 +168,7 @@ cat > "$PLIST_SRC" << PLIST
     <key>ProgramArguments</key>
     <array>
         <string>$PYTHON_BIN</string>
-        <string>$INSTALL_DIR/dictation_daemon.py</string>
+        <string>$INSTALL_DIR/auto_whisper/main.py</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -176,6 +195,42 @@ cat > "$PLIST_SRC" << PLIST
 PLIST
 
 echo "  ✓ LaunchAgent configured"
+
+# ─── Generate Meeting Transcriber LaunchAgent plist ───
+cat > "$MEETING_PLIST_SRC" << MEETING_PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>$MEETING_PLIST_LABEL</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$PYTHON_BIN</string>
+        <string>$INSTALL_DIR/meetings_intel/main.py</string>
+    </array>
+    <key>WatchPaths</key>
+    <array>
+        <string>$HOME/MeetingInbox</string>
+    </array>
+    <key>StandardOutPath</key>
+    <string>$LOGS_DIR/meetingtranscriber.out</string>
+    <key>StandardErrorPath</key>
+    <string>$LOGS_DIR/meetingtranscriber.err</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONPATH</key>
+        <string>$INSTALL_DIR</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>LANG</key>
+        <string>en_US.UTF-8</string>
+    </dict>
+</dict>
+</plist>
+MEETING_PLIST
+
+echo "  ✓ MeetingsIntel LaunchAgent configured"
 
 # ─── Install .app to Applications ───
 APP_DIR="/Applications/auto-whisper.app"
@@ -265,6 +320,9 @@ if [[ "$START" =~ ^[Yy] ]]; then
     launchctl unload "$PLIST_DST" 2>/dev/null || true
     ln -sf "$PLIST_SRC" "$PLIST_DST"
     launchctl load "$PLIST_DST"
+    launchctl unload "$MEETING_PLIST_DST" 2>/dev/null || true
+    ln -sf "$MEETING_PLIST_SRC" "$MEETING_PLIST_DST"
+    launchctl load "$MEETING_PLIST_DST"
     sleep 2
 
     if launchctl list | grep -q "$PLIST_LABEL"; then
@@ -275,19 +333,22 @@ if [[ "$START" =~ ^[Yy] ]]; then
         echo "  │  How to use:                                │"
         echo "  │                                             │"
         echo "  │  Dictate:   double-tap Right ⌘              │"
+        echo "  │  Organize:  click ◎ → Organize ideas        │"
         echo "  │  Summarize: double-tap Left ⌘               │"
         echo "  │  Stop:      double-tap Left ⌘ while speaking│"
         echo "  │  Menu:      click ◎ in menu bar             │"
         echo "  │                                             │"
-        echo "  │  Meetings: drop audio in ~/MeetingInbox/    │"
+        echo "  │  MeetingsIntel: drop audio in ~/MeetingInbox│"
         echo "  └─────────────────────────────────────────────┘"
     else
         echo "  ✗ Failed to start. Check: $LOGS_DIR/auto-whisper.err"
     fi
 else
     ln -sf "$PLIST_SRC" "$PLIST_DST"
+    ln -sf "$MEETING_PLIST_SRC" "$MEETING_PLIST_DST"
     echo "  LaunchAgent installed. Start with:"
     echo "    launchctl load $PLIST_DST"
+    echo "    launchctl load $MEETING_PLIST_DST"
     echo "  Or open auto-whisper from Applications/Spotlight."
 fi
 
@@ -296,6 +357,7 @@ echo "  Commands:"
 echo "    Start:     launchctl load $PLIST_DST"
 echo "    Stop:      launchctl unload $PLIST_DST"
 echo "    Logs:      tail -f $LOGS_DIR/dictation.log"
+echo "    Meetings:  launchctl kickstart -k gui/$(id -u)/$MEETING_PLIST_LABEL"
 echo "    Config:    nano $ENV_FILE"
 echo "    Reinstall: cd $INSTALL_DIR && bash install.sh"
 echo ""

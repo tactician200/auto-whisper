@@ -8,7 +8,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/Users/mantra/src/meeting-transcriber/.venv/bin/python</string>
-        <string>/Users/mantra/src/meeting-transcriber/transcribe_meeting.py</string>
+        <string>/Users/mantra/src/meeting-transcriber/meetings_intel/main.py</string>
     </array>
 
     <key>WatchPaths</key>

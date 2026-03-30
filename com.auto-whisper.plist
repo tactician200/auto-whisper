@@ -8,7 +8,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/Users/mantra/src/meeting-transcriber/.venv/bin/python</string>
-        <string>/Users/mantra/src/meeting-transcriber/dictation_daemon.py</string>
+        <string>/Users/mantra/src/meeting-transcriber/auto_whisper/main.py</string>
     </array>
 
     <key>RunAtLoad</key>

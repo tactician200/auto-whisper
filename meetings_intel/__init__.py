@@ -1,0 +1,1 @@
+"""MeetingsIntel app package."""

@@ -1,0 +1,1 @@
+"""AutoWhisper app package."""

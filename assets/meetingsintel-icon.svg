@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="MeetingsIntel icon">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#111827"/>
+    </linearGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#14b8a6"/>
+      <stop offset="100%" stop-color="#0ea5e9"/>
+    </linearGradient>
+    <linearGradient id="note" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f8fafc"/>
+      <stop offset="100%" stop-color="#dbeafe"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="64" y="64" width="896" height="896" rx="224" fill="url(#bg)"/>
+
+  <rect x="180" y="220" width="664" height="540" rx="88" fill="url(#card)"/>
+  <path d="M250 316h116l60 76h342c42 0 76 34 76 76v160c0 42-34 76-76 76H256c-42 0-76-34-76-76V392c0-42 34-76 76-76z" fill="#0b1220" opacity="0.26"/>
+
+  <rect x="286" y="332" width="452" height="332" rx="48" fill="url(#note)"/>
+  <rect x="342" y="404" width="54" height="184" rx="27" fill="#0f172a"/>
+  <rect x="442" y="454" width="54" height="84" rx="27" fill="#0f172a"/>
+  <rect x="542" y="382" width="54" height="228" rx="27" fill="#0f172a"/>
+  <rect x="642" y="438" width="54" height="116" rx="27" fill="#0f172a"/>
+
+  <path d="M322 748c58 42 122 64 190 64 120 0 222-54 302-162" fill="none" stroke="#f8fafc" stroke-width="40" stroke-linecap="round"/>
+  <path d="M733 596l115 32-72 97" fill="none" stroke="#f8fafc" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <circle cx="766" cy="268" r="42" fill="#f8fafc"/>
+  <path d="M766 194v148M692 268h148" stroke="#0f172a" stroke-width="26" stroke-linecap="round"/>
+</svg>
