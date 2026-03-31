@@ -9,37 +9,39 @@ from shared.config import GROQ_API_KEY_DICTATION
 
 logger = logging.getLogger(__name__)
 
-PROMPT_SUMMARIZE = """Di la esencia de este texto en 2-3 frases cortas. Solo lo que importa. \
-Nada de contexto, introducción ni explicaciones. Como un titular expandido.
-Español, directo, sin muletillas.
+PROMPT_SUMMARIZE = """Resume en 2-3 frases. Sin saludo, sin introducción, sin "el texto dice".
+Solo la esencia — lo que importa, directo.
+Español fluido, apto para escuchar.
 
 TEXTO:
 {text}"""
 
-PROMPT_EXPLAIN = """Explica este texto como un colega senior que domina el tema.
-
-Reglas:
-- Identifica la idea central, por qué importa, y qué implica
-- Si hay jerga técnica, tradúcela a lenguaje claro sin perder precisión
-- Habla en español, claro y directo
-- Escribe como si fueras a leerlo en voz alta — fluido y conversacional
+PROMPT_EXPLAIN_VOICE = """Explica esto en voz alta. Sin saludo. Sin "vamos a ver" ni "déjame explicarte". Sin resumen al final.
+Ve al punto: idea central, por qué importa, qué implica — solo lo que el contenido merezca, sin anunciarlo.
+Integra términos técnicos dentro del flujo sin pausas pedagógicas.
+Largo adaptado: texto simple → 2-3 oraciones; complejo → lo que necesite.
+Español conversacional, sin markdown ni viñetas.
 
 TEXTO:
 {text}"""
 
-PROMPT_ORGANIZE_IDEAS = """Convierte esta dictación en un texto claro, ordenado y listo para pegar.
+PROMPT_EXPLAIN_PASTE = """Explica como colega senior. Sin saludo ni introducción.
+Idea central → por qué importa → qué implica. Solo lo que el texto merezca.
+Usa estructura (bullets, párrafos cortos) solo si el contenido lo justifica — no por defecto.
+Español claro y preciso.
 
-Reglas:
-- Mantén el significado original. No inventes hechos ni detalles.
-- Limpia muletillas, repeticiones, frases a medio cerrar y ruido verbal.
-- Ordena las ideas de forma lógica.
-- Si hay varios puntos, usa viñetas.
-- Si hay pasos o acciones, usa una lista numerada.
-- Si el contenido ya está bastante claro, solo mejora redacción y estructura.
-- Escribe en español claro, directo y útil.
-- Devuelve solo el resultado final.
+TEXTO:
+{text}"""
 
-DICTACIÓN:
+PROMPT_ORGANIZE = """Convierte esto en texto limpio, ordenado y listo para usar.
+
+- Mantén el significado exacto. No agregues contenido.
+- Elimina muletillas, repeticiones y ruido verbal.
+- Ordena lógicamente. Bullets para puntos múltiples, numeración para pasos/acciones.
+- Si ya está bien escrito, solo limpia formato.
+- Devuelve solo el resultado.
+
+TEXTO:
 {text}"""
 
 
@@ -80,14 +82,15 @@ def summarize(text: str) -> str | None:
     return _call_groq(PROMPT_SUMMARIZE.format(text=text[:4000]))
 
 
-def explain(text: str) -> str | None:
-    """Explain text. Returns voice-ready text."""
-    return _call_groq(PROMPT_EXPLAIN.format(text=text[:4000]))
+def explain(text: str, for_voice: bool = True) -> str | None:
+    """Explain text. for_voice=True: conversational, no markdown. False: structured for paste."""
+    prompt = PROMPT_EXPLAIN_VOICE if for_voice else PROMPT_EXPLAIN_PASTE
+    return _call_groq(prompt.format(text=text[:4000]))
 
 
 def organize_ideas(text: str) -> str | None:
-    """Turn rough dictated ideas into organized notes ready to paste."""
-    return _call_groq(PROMPT_ORGANIZE_IDEAS.format(text=text[:4000]))
+    """Turn rough dictated ideas or clipboard text into organized notes ready to paste."""
+    return _call_groq(PROMPT_ORGANIZE.format(text=text[:4000]))
 
 
 def notify(title: str, message: str):

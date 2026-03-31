@@ -716,11 +716,6 @@ class AutoWhisperApp(rumps.App):
         self._lang_en = rumps.MenuItem(LANG_EN, callback=self._set_language)
         self._update_lang_checks()
 
-        # Output mode submenu
-        self._out_speak = rumps.MenuItem(OUTPUT_SPEAK, callback=self._set_output_mode)
-        self._out_paste = rumps.MenuItem(OUTPUT_PASTE, callback=self._set_output_mode)
-        self._update_output_checks()
-
         # Input device submenu
         self._input_items: dict[str, rumps.MenuItem] = {}
         self._input_system_default = rumps.MenuItem(INPUT_SYSTEM_DEFAULT, callback=self._set_input_device)
@@ -753,6 +748,8 @@ class AutoWhisperApp(rumps.App):
         self._btn_explain.set_callback(self._menu_explain)
         self._btn_organize_text = rumps.MenuItem("◻  Organize text")
         self._btn_organize_text.set_callback(self._menu_organize_text)
+        self._btn_output_toggle = rumps.MenuItem(self._output_toggle_label())
+        self._btn_output_toggle.set_callback(self._toggle_output_mode)
 
         self.menu = [
             self._btn_dictate,
@@ -764,9 +761,9 @@ class AutoWhisperApp(rumps.App):
             self._btn_organize_text,
             self._btn_read,
             None,
+            self._btn_output_toggle,
+            None,
             [rumps.MenuItem("Settings"), [
-                [rumps.MenuItem("Output"), [self._out_speak, self._out_paste]],
-                None,
                 [rumps.MenuItem("Engine"), [self._mode_cloud, self._mode_local, self._mode_auto]],
                 [rumps.MenuItem("Language"), [self._lang_es, self._lang_en, self._lang_auto]],
                 [rumps.MenuItem("Input"), self._input_menu_items],
@@ -802,14 +799,13 @@ class AutoWhisperApp(rumps.App):
         self._lang_es.state = self._language == LANG_ES
         self._lang_en.state = self._language == LANG_EN
 
-    def _set_output_mode(self, sender):
-        self._output_mode = sender.title
-        self._update_output_checks()
-        logger.info(f"Output mode changed to: {self._output_mode}")
+    def _output_toggle_label(self) -> str:
+        return f"⇄  Output: {self._output_mode}"
 
-    def _update_output_checks(self):
-        self._out_speak.state = self._output_mode == OUTPUT_SPEAK
-        self._out_paste.state = self._output_mode == OUTPUT_PASTE
+    def _toggle_output_mode(self, _):
+        self._output_mode = OUTPUT_PASTE if self._output_mode == OUTPUT_SPEAK else OUTPUT_SPEAK
+        self._btn_output_toggle.title = self._output_toggle_label()
+        logger.info(f"Output mode: {self._output_mode}")
 
     def _refresh_input_devices(self):
         """Re-enumerate audio input devices and rebuild the Input submenu."""
@@ -980,7 +976,7 @@ class AutoWhisperApp(rumps.App):
                     elif action == "organize_text":
                         result_text = organize_ideas(text)
                     else:
-                        result_text = explain(text)
+                        result_text = explain(text, for_voice=not paste_output)
 
                 if not result_text:
                     self._set_ui(self.ICON_IDLE, "Processing failed")
