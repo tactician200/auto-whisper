@@ -1,6 +1,9 @@
-sounddevice
-pynput
 rumps
-google-generativeai
-pyautogui
 numpy
+sounddevice
+groq
+edge-tts
+google-genai
+pyobjc-framework-Cocoa
+pyobjc-framework-Quartz
+pyobjc-framework-ApplicationServices

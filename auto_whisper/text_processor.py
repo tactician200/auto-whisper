@@ -65,7 +65,7 @@ def _call_groq(prompt: str) -> str | None:
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
-            max_completion_tokens=800,
+            max_completion_tokens=2000,
         )
         text = response.choices[0].message.content.strip()
         logger.info(f"LLM response ({len(text)} chars): {text[:100]}...")

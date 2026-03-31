@@ -363,13 +363,16 @@ def transcribe_cloud(audio_data: np.ndarray, language: str | None = "es") -> str
 
 # --- Transcription: Local (whisper.cpp) ---
 
+WHISPER_ARTIFACTS = {"[BLANK_AUDIO]", "[Music]", "[Applause]", "[Silence]", "(Silence)", "(Music)"}
+
+
 def transcribe_local(audio_data: np.ndarray, language: str | None = "es") -> str | None:
     """Transcribe via local whisper.cpp. ~6-8s latency."""
+    from shared.whisper_runner import transcribe_wav
+
     tmpdir = tempfile.mkdtemp()
     try:
         wav_path = os.path.join(tmpdir, "audio.wav")
-        out_base = os.path.join(tmpdir, "out")
-
         with wave.open(wav_path, "w") as wf:
             wf.setnchannels(1)
             wf.setsampwidth(2)
@@ -377,30 +380,22 @@ def transcribe_local(audio_data: np.ndarray, language: str | None = "es") -> str
             pcm = (audio_data * 32767).astype(np.int16)
             wf.writeframes(pcm.tobytes())
 
-        cmd = [
-            str(WHISPER_BIN), "-m", str(WHISPER_MODEL),
-            "-f", wav_path,
-            "-otxt", "-of", out_base, "--no-timestamps",
-            "--beam-size", "8",
-            "--entropy-thold", "2.4",
-        ]
-        if WHISPER_PROMPT:
-            cmd.extend(["--prompt", WHISPER_PROMPT])
-        if language:
-            cmd.extend(["-l", language])
-
         t0 = time.time()
-        result = subprocess.run(cmd, capture_output=True, text=True,
-                                encoding="utf-8", timeout=120)
+        text = transcribe_wav(
+            Path(wav_path),
+            model=WHISPER_MODEL,
+            language=language,
+            beam_size=8,
+            entropy_thold=2.4,
+            no_timestamps=True,
+            prompt=WHISPER_PROMPT,
+            timeout=120,
+        )
         elapsed = time.time() - t0
         logger.info(f"Local transcription: {elapsed:.1f}s")
 
-        txt_file = Path(f"{out_base}.txt")
-        if result.returncode == 0 and txt_file.exists():
-            text = txt_file.read_text(encoding="utf-8").strip()
-            WHISPER_ARTIFACTS = {"[BLANK_AUDIO]", "[Music]", "[Applause]", "[Silence]", "(Silence)", "(Music)"}
-            if text and text not in WHISPER_ARTIFACTS:
-                return _clean_transcription(text) or None
+        if text and text not in WHISPER_ARTIFACTS:
+            return _clean_transcription(text) or None
         return None
     except Exception as e:
         logger.error(f"Local transcription failed: {e}")
