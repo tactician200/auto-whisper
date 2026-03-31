@@ -761,11 +761,11 @@ class AutoWhisperApp(rumps.App):
             self._btn_read,
             self._btn_summarize,
             self._btn_explain,
-            self._btn_stop,
             self._btn_output_toggle,
             None,
             self._btn_organize_text,
             None,
+            self._btn_stop,
             self._btn_paste_last,
             [rumps.MenuItem("Settings"), [
                 [rumps.MenuItem("Engine"), [self._mode_cloud, self._mode_local, self._mode_auto]],
