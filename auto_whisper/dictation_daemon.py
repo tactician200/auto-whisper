@@ -298,6 +298,15 @@ def inject_text(text: str, target_app=None):
     threading.Thread(target=_do_inject, daemon=True).start()
 
 
+def resample_audio(audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
+    """Resample mono audio array from orig_sr to target_sr using linear interpolation."""
+    if orig_sr == target_sr:
+        return audio
+    target_len = int(len(audio) * target_sr / orig_sr)
+    orig_indices = np.linspace(0, len(audio) - 1, target_len)
+    return np.interp(orig_indices, np.arange(len(audio)), audio).astype(np.float32)
+
+
 def list_input_devices() -> list[tuple[str, int]]:
     try:
         hostapis = sd.query_hostapis()
@@ -659,6 +668,7 @@ class AutoWhisperApp(rumps.App):
         self._target_app = None
         self._monitor = None
         self._record_start_time = None
+        self._capture_sample_rate = SAMPLE_RATE  # may differ if device needs native SR
         self.title = self.ICON_IDLE
         self._last_rcmd_time = 0
         self._rcmd_was_down = False
@@ -1089,19 +1099,38 @@ class AutoWhisperApp(rumps.App):
                     f"(route: {route_label}, default SR {input_device['default_samplerate']:.0f} Hz)"
                 )
 
-                self.stream = sd.InputStream(
-                    device=stream_device,
-                    samplerate=SAMPLE_RATE, channels=1,
-                    dtype="float32", blocksize=FRAMES_PER_BUFFER,
-                    callback=self._audio_callback,
-                )
+                # Try to open at target SR; if device rejects it, fall back to native SR
+                native_sr = int(input_device.get("default_samplerate", SAMPLE_RATE))
+                capture_sr = SAMPLE_RATE
+                try:
+                    self.stream = sd.InputStream(
+                        device=stream_device,
+                        samplerate=SAMPLE_RATE, channels=1,
+                        dtype="float32", blocksize=FRAMES_PER_BUFFER,
+                        callback=self._audio_callback,
+                    )
+                except Exception as sr_error:
+                    if native_sr == SAMPLE_RATE:
+                        raise
+                    logger.warning(
+                        f"Cannot open stream at {SAMPLE_RATE} Hz "
+                        f"({sr_error}); retrying at native {native_sr} Hz"
+                    )
+                    capture_sr = native_sr
+                    self.stream = sd.InputStream(
+                        device=stream_device,
+                        samplerate=native_sr, channels=1,
+                        dtype="float32", blocksize=FRAMES_PER_BUFFER,
+                        callback=self._audio_callback,
+                    )
+                self._capture_sample_rate = capture_sr
                 started_at = time.time()
                 self._record_start_time = started_at
                 self._last_voice_time = started_at
                 self.stream.start()
                 status = "Recording..." if recording_mode == RECORDING_MODE_DICTATE else "Recording ideas..."
                 self._set_ui(self.ICON_RECORDING, status)
-                logger.info(f"Recording started ({recording_mode})")
+                logger.info(f"Recording started ({recording_mode}) at {capture_sr} Hz")
             except Exception as e:
                 logger.error(f"Failed to start recording: {e}")
                 self.recording = False
@@ -1180,8 +1209,14 @@ class AutoWhisperApp(rumps.App):
         self._set_ui(self.ICON_PROCESSING, f"{action_label.capitalize()} ({engine_label})...")
         logger.info(f"Recording stopped. {len(frames_copy)} chunks captured")
 
+        capture_sr = self._capture_sample_rate
+
         def process():
             audio = np.concatenate(frames_copy, axis=0).flatten()
+            # Resample if device was opened at a non-standard rate (e.g. AirPods at 24kHz)
+            if capture_sr != SAMPLE_RATE:
+                audio = resample_audio(audio, capture_sr, SAMPLE_RATE)
+                logger.info(f"Resampled audio {capture_sr} Hz → {SAMPLE_RATE} Hz")
             duration = len(audio) / SAMPLE_RATE
             logger.info(f"Audio duration: {duration:.1f}s")
 
