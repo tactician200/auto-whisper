@@ -72,13 +72,15 @@ def transcribe_wav(
     if prompt:
         cmd.extend(["--prompt", prompt])
 
+    proc = None
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True,
-            encoding="utf-8", timeout=timeout,
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8",
         )
-        if result.returncode != 0:
-            logger.error(f"whisper failed: {result.stderr}")
+        stdout, stderr = proc.communicate(timeout=timeout)
+        if proc.returncode != 0:
+            logger.error(f"whisper failed: {stderr}")
             return None
 
         txt_file = Path(f"{output_base}.txt")
@@ -88,10 +90,12 @@ def transcribe_wav(
         logger.error(f"Transcript file not found: {txt_file}")
         return None
     except subprocess.TimeoutExpired:
-        logger.error("whisper timed out")
+        if proc:
+            proc.kill()
+            proc.wait()
+        logger.error("whisper timed out (killed)")
         return None
     finally:
-        import shutil
         shutil.rmtree(output_dir, ignore_errors=True)
 
 

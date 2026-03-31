@@ -45,15 +45,7 @@ TEXTO:
 {text}"""
 
 
-_groq_client = None
-
-
-def _get_groq_client():
-    global _groq_client
-    if _groq_client is None:
-        from groq import Groq
-        _groq_client = Groq(api_key=GROQ_API_KEY_DICTATION)
-    return _groq_client
+from shared.groq_client import get_groq_client as _get_groq_client
 
 
 def _call_groq(prompt: str) -> str | None:

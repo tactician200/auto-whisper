@@ -66,13 +66,22 @@ def _speak_edge(text: str, output: Path, voice: str = "es-ES-AlvaroNeural"):
 def _speak_macos(text: str, output: Path, voice: str = "Mónica"):
     # say outputs AIFF by default
     aiff_path = output.with_suffix(".aiff")
-    subprocess.run(
-        ["say", "-v", voice, "-o", str(aiff_path), text],
-        timeout=120, capture_output=True,
-    )
-    # Rename to expected path if different
-    if aiff_path != output:
-        aiff_path.rename(output)
+    try:
+        result = subprocess.run(
+            ["say", "-v", voice, "-o", str(aiff_path), text],
+            timeout=120, capture_output=True,
+        )
+        if result.returncode != 0:
+            logger.error(f"say failed: {result.stderr}")
+            return
+        # Rename to expected path if different
+        if aiff_path != output:
+            aiff_path.rename(output)
+    except Exception:
+        # Clean up orphaned aiff file on any failure
+        if aiff_path.exists():
+            aiff_path.unlink(missing_ok=True)
+        raise
 
 
 # --- Unified interface ---

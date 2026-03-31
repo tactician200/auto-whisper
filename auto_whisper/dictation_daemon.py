@@ -72,18 +72,10 @@ SOUND_START_DICTATE = "Tink"
 SOUND_START_ORGANIZE = "Glass"
 SOUND_STOP_RECORDING = "Pop"
 
-# Lazy-init Groq client (reuse connection pool)
-_groq_client = None
+# Shared Groq client (thread-safe singleton)
+from shared.groq_client import get_groq_client as _get_groq_client
 _injection_lock = threading.Lock()
 _sound_cache = {}
-
-
-def _get_groq_client():
-    global _groq_client
-    if _groq_client is None:
-        from groq import Groq
-        _groq_client = Groq(api_key=GROQ_API_KEY_DICTATION)
-    return _groq_client
 
 # Transcription modes
 MODE_AUTO = "Auto"
@@ -532,7 +524,7 @@ class UsageTracker:
         half = 1 if (filled - full) >= 0.5 else 0
         empty = CELLS - full - half
         bar = "◼" * full + ("◻" if half else "") + "·" * empty
-        return f"{bar} {used_min:.0f}m · {pct:.0f}%"
+        return f"API: {bar} {used_min:.0f}m · {pct:.0f}%"
 
     @property
     def is_near_limit(self) -> bool:
@@ -751,14 +743,14 @@ class AutoWhisperApp(rumps.App):
         self._btn_organize = rumps.MenuItem("Organize what I say")
         self._btn_organize.set_callback(self._menu_organize)
         self._btn_paste_last = rumps.MenuItem("↩ Re-paste last")
-        self._btn_paste_last.set_callback(self._paste_last)
+        self._btn_paste_last.set_callback(None)  # disabled until first transcription
         self._update_action_titles()
 
         self.menu = [
             self._btn_dictate,
             self._btn_organize,
-            None,
             self._btn_read,
+            None,
             self._btn_summarize,
             self._btn_explain,
             self._btn_output_toggle,
@@ -997,6 +989,7 @@ class AutoWhisperApp(rumps.App):
 
                 if paste_output:
                     self._last_transcription = result_text
+                    self._btn_paste_last.set_callback(self._paste_last)
                     self._set_ui(self.ICON_PROCESSING, "Pasting...")
                 else:
                     self._set_ui(self.ICON_SPEAKING, "Speaking...")
@@ -1118,6 +1111,7 @@ class AutoWhisperApp(rumps.App):
         self._last_voice_time = now
         self._silence_stop_fired = False
         self._max_duration_stop_fired = False
+        self._capture_sample_rate = SAMPLE_RATE  # safe default; record() updates if device needs native SR
         self.recording = True
         self._target_app = self._resolve_paste_target()
         start_label = "Starting mic..." if recording_mode == RECORDING_MODE_DICTATE else "Starting organizer..."
@@ -1337,6 +1331,7 @@ class AutoWhisperApp(rumps.App):
                         logger.warning("Idea organization returned empty, falling back to raw transcript")
 
                 self._last_transcription = output_text
+                self._btn_paste_last.set_callback(self._paste_last)
                 inject_text(output_text, target_app=self._target_app)
                 engine_label_short = "cloud" if "groq" in engine else "local"
                 status_prefix = "Organized" if recording_mode == RECORDING_MODE_ORGANIZE else "Pasted"
