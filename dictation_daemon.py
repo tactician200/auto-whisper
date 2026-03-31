@@ -20,6 +20,8 @@ import tempfile
 import shutil
 import wave
 import io
+import json
+import re
 import unicodedata
 import numpy as np
 import sounddevice as sd
@@ -31,7 +33,7 @@ os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 from pathlib import Path
 from AppKit import (
     NSEvent, NSFlagsChangedMask, NSWorkspace,
-    NSPasteboard, NSPasteboardTypeString, NSApplication,
+    NSPasteboard, NSPasteboardTypeString, NSApplication, NSSound,
 )
 from Quartz import (
     CGEventCreateKeyboardEvent, CGEventSetFlags, CGEventPost,
@@ -59,19 +61,21 @@ LEFT_CMD_KEYCODE = 55
 DOUBLE_TAP_WINDOW = 0.4
 V_KEYCODE = 9
 C_KEYCODE = 8
+PASTEBOARD_RESTORE_DELAY = 0.6
 
 # No sentence prompt — only vocabulary hints to avoid hallucination on long audio
 WHISPER_PROMPT = None
 MAX_RECORDING_SECONDS = 300  # 5 min auto-stop guard
 SILENCE_AUTOSTOP_SECONDS = 5.0  # auto-stop after N seconds of silence
 SILENCE_RMS_THRESHOLD = 0.008  # below this RMS = silence
-SOUND_START_DICTATE = "Glass"
-SOUND_START_ORGANIZE = "Hero"
+SOUND_START_DICTATE = "Tink"
+SOUND_START_ORGANIZE = "Glass"
 SOUND_STOP_RECORDING = "Pop"
 
 # Lazy-init Groq client (reuse connection pool)
 _groq_client = None
 _injection_lock = threading.Lock()
+_sound_cache = {}
 
 
 def _get_groq_client():
@@ -85,6 +89,7 @@ def _get_groq_client():
 MODE_AUTO = "Auto"
 MODE_CLOUD = "Cloud (Groq)"
 MODE_LOCAL = "Local"
+INPUT_SYSTEM_DEFAULT = "System Default"
 
 RECORDING_MODE_DICTATE = "dictate"
 RECORDING_MODE_ORGANIZE = "organize"
@@ -102,6 +107,22 @@ def play_sound(name: str):
     """Play macOS system sound (thread-safe, non-blocking)."""
     sound_path = f"/System/Library/Sounds/{name}.aiff"
     try:
+        sound = _sound_cache.get(name)
+        if sound is None:
+            sound = NSSound.soundNamed_(name)
+            if sound is None and Path(sound_path).exists():
+                sound = NSSound.alloc().initWithContentsOfFile_byReference_(sound_path, True)
+            if sound is not None:
+                _sound_cache[name] = sound
+
+        if sound is not None:
+            sound.stop()
+            sound.play()
+            return
+    except Exception as e:
+        logger.warning(f"Failed to play AppKit sound '{name}': {e}")
+
+    try:
         subprocess.Popen(
             ["/usr/bin/afplay", sound_path],
             stdout=subprocess.DEVNULL,
@@ -109,6 +130,21 @@ def play_sound(name: str):
         )
     except Exception as e:
         logger.warning(f"Failed to play sound '{name}': {e}")
+
+
+def preload_sounds(*names: str):
+    for name in names:
+        try:
+            if name in _sound_cache:
+                continue
+            sound = NSSound.soundNamed_(name)
+            sound_path = f"/System/Library/Sounds/{name}.aiff"
+            if sound is None and Path(sound_path).exists():
+                sound = NSSound.alloc().initWithContentsOfFile_byReference_(sound_path, True)
+            if sound is not None:
+                _sound_cache[name] = sound
+        except Exception:
+            pass
 
 
 # --- Internet check ---
@@ -136,6 +172,13 @@ def check_accessibility() -> bool:
 
 def get_frontmost_app():
     return NSWorkspace.sharedWorkspace().frontmostApplication()
+
+
+def is_own_app(app) -> bool:
+    try:
+        return bool(app) and app.processIdentifier() == os.getpid()
+    except Exception:
+        return False
 
 
 def restore_focus(app):
@@ -216,7 +259,7 @@ def inject_text(text: str, target_app=None):
                 for attempt in range(3):
                     if target_app:
                         restore_focus(target_app)
-                        if not _wait_for_frontmost_app(target_app, timeout=0.8):
+                        if not _wait_for_frontmost_app(target_app, timeout=1.2):
                             logger.warning(
                                 f"Target app did not regain focus before paste attempt {attempt + 1}"
                             )
@@ -231,7 +274,7 @@ def inject_text(text: str, target_app=None):
                     CGEventSetFlags(event_up, kCGEventFlagMaskCommand)
                     CGEventPost(kCGHIDEventTap, event_down)
                     CGEventPost(kCGHIDEventTap, event_up)
-                    time.sleep(0.18 + attempt * 0.08)
+                    time.sleep(0.24 + attempt * 0.12)
 
                     current = NSWorkspace.sharedWorkspace().frontmostApplication()
                     if not target_app or (
@@ -247,12 +290,33 @@ def inject_text(text: str, target_app=None):
                     logger.warning("Paste shortcut may have missed the target app")
                     play_sound("Basso")
             finally:
-                time.sleep(0.3)
+                time.sleep(PASTEBOARD_RESTORE_DELAY)
                 if old_content is not None:
                     board.clearContents()
                     board.setString_forType_(old_content, NSPasteboardTypeString)
 
     threading.Thread(target=_do_inject, daemon=True).start()
+
+
+def list_input_devices() -> list[tuple[str, int]]:
+    try:
+        hostapis = sd.query_hostapis()
+        devices = []
+        for index, device in enumerate(sd.query_devices()):
+            if int(device.get("max_input_channels", 0) or 0) < 1:
+                continue
+            hostapi_name = ""
+            hostapi_index = device.get("hostapi")
+            if isinstance(hostapi_index, int) and 0 <= hostapi_index < len(hostapis):
+                hostapi_name = hostapis[hostapi_index].get("name", "")
+            label = device.get("name", f"Input {index}")
+            if hostapi_name:
+                label = f"{label} [{hostapi_name}]"
+            devices.append((label, index))
+        return devices
+    except Exception as e:
+        logger.warning(f"Could not enumerate input devices: {e}")
+        return []
 
 
 # --- Transcription: Cloud (Groq) ---
@@ -351,27 +415,90 @@ class UsageTracker:
     """Track daily Groq API usage against free tier limits."""
     DAILY_AUDIO_LIMIT = 28800  # seconds (8 hours) — Groq free tier
     DAILY_REQUEST_LIMIT = 2000
+    STATE_PATH = LOGS / "usage_tracker.json"
+    LOG_USAGE_RE = re.compile(r"Groq usage: Usage:\s+.*?(\d+)/(\d+)min")
 
     def __init__(self):
         self._lock = threading.Lock()
         self._date = None
         self.audio_seconds = 0.0
         self.requests = 0
+        self._load_state()
         self._reset_if_new_day()
 
-    def _reset_if_new_day(self):
+    def _today_key(self) -> str:
         from datetime import date
-        today = date.today()
+        return date.today().isoformat()
+
+    def _load_state(self):
+        try:
+            if self.STATE_PATH.exists():
+                data = json.loads(self.STATE_PATH.read_text(encoding="utf-8"))
+                self._date = data.get("date")
+                self.audio_seconds = float(data.get("audio_seconds", 0.0) or 0.0)
+                self.requests = int(data.get("requests", 0) or 0)
+                return
+        except Exception as e:
+            logger.warning(f"Could not load usage tracker state: {e}")
+
+        self._load_today_from_logs()
+
+    def _load_today_from_logs(self):
+        today_key = self._today_key()
+        log_path = LOGS / "dictation.log"
+        self._date = today_key
+        self.audio_seconds = 0.0
+        self.requests = 0
+
+        if not log_path.exists():
+            return
+
+        try:
+            max_used_minutes = 0
+            request_count = 0
+            for line in log_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                if not line.startswith(today_key):
+                    continue
+                match = self.LOG_USAGE_RE.search(line)
+                if not match:
+                    continue
+                request_count += 1
+                max_used_minutes = max(max_used_minutes, int(match.group(1)))
+
+            self.audio_seconds = float(max_used_minutes * 60)
+            self.requests = request_count
+            if max_used_minutes or request_count:
+                logger.info(
+                    f"Usage tracker restored from logs: {max_used_minutes}min, {request_count} cloud requests"
+                )
+                self._save_state_locked()
+        except Exception as e:
+            logger.warning(f"Could not rebuild usage tracker from logs: {e}")
+
+    def _save_state_locked(self):
+        payload = {
+            "date": self._date,
+            "audio_seconds": self.audio_seconds,
+            "requests": self.requests,
+        }
+        tmp_path = self.STATE_PATH.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=True), encoding="utf-8")
+        tmp_path.replace(self.STATE_PATH)
+
+    def _reset_if_new_day(self):
+        today = self._today_key()
         if self._date != today:
             self._date = today
             self.audio_seconds = 0.0
             self.requests = 0
+            self._save_state_locked()
 
     def record(self, audio_duration: float):
         with self._lock:
             self._reset_if_new_day()
             self.audio_seconds += audio_duration
             self.requests += 1
+            self._save_state_locked()
 
     @property
     def audio_pct(self) -> float:
@@ -547,6 +674,17 @@ class AutoWhisperApp(rumps.App):
         self._silence_stop_fired = False
         self._max_duration_stop_fired = False
         self._recording_mode = RECORDING_MODE_DICTATE
+        self._last_paste_target = None
+        self._input_device_index = None
+        self._input_device_label = INPUT_SYSTEM_DEFAULT
+        preload_sounds(
+            SOUND_START_DICTATE,
+            SOUND_START_ORGANIZE,
+            SOUND_STOP_RECORDING,
+            "Tink",
+            "Basso",
+            "Funk",
+        )
 
         # Default mode
         self._mode = MODE_CLOUD if GROQ_API_KEY_DICTATION else MODE_LOCAL
@@ -564,6 +702,18 @@ class AutoWhisperApp(rumps.App):
         self._lang_en = rumps.MenuItem(LANG_EN, callback=self._set_language)
         self._update_lang_checks()
 
+        # Input device submenu
+        self._input_items: dict[str, rumps.MenuItem] = {}
+        self._input_system_default = rumps.MenuItem(INPUT_SYSTEM_DEFAULT, callback=self._set_input_device)
+        self._input_items[INPUT_SYSTEM_DEFAULT] = self._input_system_default
+        self._input_device_options = [(INPUT_SYSTEM_DEFAULT, None), *list_input_devices()]
+        self._input_menu_items = [self._input_system_default]
+        for label, index in self._input_device_options[1:]:
+            item = rumps.MenuItem(label, callback=self._set_input_device)
+            self._input_menu_items.append(item)
+            self._input_items[label] = item
+        self._update_input_checks()
+
         self._usage_item = rumps.MenuItem(usage_tracker.format_bar())
         self._status_item = rumps.MenuItem(self._format_status_line())
 
@@ -572,6 +722,8 @@ class AutoWhisperApp(rumps.App):
         self._btn_dictate.set_callback(self._menu_toggle)
         self._btn_organize = rumps.MenuItem("Organize ideas")
         self._btn_organize.set_callback(self._menu_organize)
+        self._btn_paste_last = rumps.MenuItem("Paste Last")
+        self._btn_paste_last.set_callback(self._paste_last)
         self._btn_summarize = rumps.MenuItem("Summarize (⌘⌘←)")
         self._btn_summarize.set_callback(self._menu_summarize)
         self._btn_read = rumps.MenuItem("Read clipboard")
@@ -582,6 +734,7 @@ class AutoWhisperApp(rumps.App):
         self.menu = [
             self._btn_dictate,
             self._btn_organize,
+            self._btn_paste_last,
             None,
             self._btn_summarize,
             self._btn_read,
@@ -589,6 +742,7 @@ class AutoWhisperApp(rumps.App):
             None,
             [rumps.MenuItem("Engine"), [self._mode_cloud, self._mode_local, self._mode_auto]],
             [rumps.MenuItem("Language"), [self._lang_es, self._lang_en, self._lang_auto]],
+            [rumps.MenuItem("Input"), self._input_menu_items],
             self._usage_item,
             self._status_item,
         ]
@@ -621,10 +775,56 @@ class AutoWhisperApp(rumps.App):
         self._lang_es.state = self._language == LANG_ES
         self._lang_en.state = self._language == LANG_EN
 
+    def _set_input_device(self, sender):
+        label = sender.title
+        if label == INPUT_SYSTEM_DEFAULT:
+            self._input_device_index = None
+            self._input_device_label = INPUT_SYSTEM_DEFAULT
+        else:
+            selected = next(
+                ((device_label, device_index) for device_label, device_index in self._input_device_options if device_label == label),
+                None,
+            )
+            if selected is None:
+                self._set_ui(self.title, "Input device unavailable")
+                play_sound("Basso")
+                return
+            self._input_device_label = selected[0]
+            self._input_device_index = selected[1]
+
+        self._update_input_checks()
+        self._set_ui(self.title, self._format_status_line())
+        logger.info(f"Input device changed to: {self._input_device_label}")
+
+    def _update_input_checks(self):
+        for label, item in self._input_items.items():
+            item.state = label == self._input_device_label
+
+    def _remember_paste_target(self, app):
+        if app and not is_own_app(app):
+            self._last_paste_target = app
+
+    def _resolve_paste_target(self):
+        current = get_frontmost_app()
+        if current and not is_own_app(current):
+            self._remember_paste_target(current)
+            return current
+        if self._target_app and not is_own_app(self._target_app):
+            return self._target_app
+        if self._last_paste_target and not is_own_app(self._last_paste_target):
+            return self._last_paste_target
+        return None
+
     def _paste_last(self, _):
         """Re-paste the last transcription."""
         if self._last_transcription:
-            inject_text(self._last_transcription, target_app=get_frontmost_app())
+            target_app = self._resolve_paste_target()
+            if target_app is None:
+                self._set_ui(self.ICON_IDLE, "No target app for paste")
+                play_sound("Basso")
+                return
+            self._set_ui(self.ICON_IDLE, "Pasting last...")
+            inject_text(self._last_transcription, target_app=target_app)
         else:
             self._set_ui(self.ICON_IDLE, "No previous transcription")
 
@@ -773,7 +973,7 @@ class AutoWhisperApp(rumps.App):
         self._silence_stop_fired = False
         self._max_duration_stop_fired = False
         self.recording = True
-        self._target_app = get_frontmost_app()
+        self._target_app = self._resolve_paste_target()
         start_label = "Starting mic..." if recording_mode == RECORDING_MODE_DICTATE else "Starting organizer..."
         self._set_ui(self.ICON_STARTING, start_label)
         target_name = self._target_app.localizedName() if self._target_app else "unknown"
@@ -787,7 +987,39 @@ class AutoWhisperApp(rumps.App):
 
         def record():
             try:
+                stream_device = self._input_device_index
+                try:
+                    input_device = (
+                        sd.query_devices(stream_device, kind="input")
+                        if stream_device is not None
+                        else sd.query_devices(kind="input")
+                    )
+                except Exception as device_error:
+                    if stream_device is None:
+                        logger.warning(f"Could not inspect default input device: {device_error}")
+                        raise
+                    logger.warning(
+                        f"Selected input unavailable ({self._input_device_label}); "
+                        f"falling back to {INPUT_SYSTEM_DEFAULT}: {device_error}"
+                    )
+                    stream_device = None
+                    self._input_device_index = None
+                    self._input_device_label = INPUT_SYSTEM_DEFAULT
+                    self._update_input_checks()
+                    input_device = sd.query_devices(kind="input")
+
+                route_label = (
+                    self._input_device_label
+                    if stream_device is not None
+                    else INPUT_SYSTEM_DEFAULT
+                )
+                logger.info(
+                    f"Input device: {input_device['name']} "
+                    f"(route: {route_label}, default SR {input_device['default_samplerate']:.0f} Hz)"
+                )
+
                 self.stream = sd.InputStream(
+                    device=stream_device,
                     samplerate=SAMPLE_RATE, channels=1,
                     dtype="float32", blocksize=FRAMES_PER_BUFFER,
                     callback=self._audio_callback,

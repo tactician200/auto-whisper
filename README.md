@@ -52,11 +52,13 @@ Only 2 permissions needed:
 ◎ click:
 ├── Dictate (⌘⌘)
 ├── Organize ideas
+├── Paste Last
 ├── Summarize (⌘⌘←)
 ├── Read clipboard
 ├── Explain clipboard
 ├── Engine ▸ Cloud (Groq) / Local / Auto
 ├── Language ▸ Español / English / Auto-detect
+├── Input ▸ System Default / micrófono específico
 ├── ▓░░░░░░░░░ 5/480min (1%)
 ├── Cloud · ES
 └── Quit
