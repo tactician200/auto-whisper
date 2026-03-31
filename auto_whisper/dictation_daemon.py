@@ -526,10 +526,13 @@ class UsageTracker:
             self._reset_if_new_day()
             pct = min(self.audio_seconds / self.DAILY_AUDIO_LIMIT * 100, 100)
             used_min = self.audio_seconds / 60
-            total_min = self.DAILY_AUDIO_LIMIT / 60
-        blocks = int(pct / 10)
-        bar = "▓" * blocks + "░" * (10 - blocks)
-        return f"Usage: {bar} {used_min:.0f}/{total_min:.0f}min ({pct:.0f}%)"
+        CELLS = 5
+        filled = pct / 100 * CELLS
+        full = int(filled)
+        half = 1 if (filled - full) >= 0.5 else 0
+        empty = CELLS - full - half
+        bar = "█" * full + ("▒" if half else "") + "░" * empty
+        return f"{bar} {used_min:.0f}m"
 
     @property
     def is_near_limit(self) -> bool:
@@ -748,6 +751,8 @@ class AutoWhisperApp(rumps.App):
         self._btn_read.set_callback(self._menu_read)
         self._btn_explain = rumps.MenuItem("◎  Explain")
         self._btn_explain.set_callback(self._menu_explain)
+        self._btn_organize_text = rumps.MenuItem("◻  Organize text")
+        self._btn_organize_text.set_callback(self._menu_organize_text)
 
         self.menu = [
             self._btn_dictate,
@@ -756,6 +761,7 @@ class AutoWhisperApp(rumps.App):
             None,
             self._btn_summarize,
             self._btn_explain,
+            self._btn_organize_text,
             self._btn_read,
             None,
             [rumps.MenuItem("Settings"), [
@@ -968,8 +974,13 @@ class AutoWhisperApp(rumps.App):
                 else:
                     self._set_ui(self.ICON_PROCESSING, f"{action.capitalize()}...")
                     play_sound("Glass")
-                    from auto_whisper.text_processor import summarize, explain
-                    result_text = summarize(text) if action == "summarize" else explain(text)
+                    from auto_whisper.text_processor import summarize, explain, organize_ideas
+                    if action == "summarize":
+                        result_text = summarize(text)
+                    elif action == "organize_text":
+                        result_text = organize_ideas(text)
+                    else:
+                        result_text = explain(text)
 
                 if not result_text:
                     self._set_ui(self.ICON_IDLE, "Processing failed")
@@ -1015,6 +1026,11 @@ class AutoWhisperApp(rumps.App):
         paste = self._output_mode == OUTPUT_PASTE
         logger.info(f"Menu: Explain clipboard ({'paste' if paste else 'speak'})")
         self._process_selection("explain", use_hotkey=False, paste_output=paste)
+
+    def _menu_organize_text(self, _):
+        paste = self._output_mode == OUTPUT_PASTE
+        logger.info(f"Menu: Organize text ({'paste' if paste else 'speak'})")
+        self._process_selection("organize_text", use_hotkey=False, paste_output=paste)
 
     # --- Hotkeys ---
 
