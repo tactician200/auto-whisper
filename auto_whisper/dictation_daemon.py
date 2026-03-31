@@ -739,6 +739,10 @@ class AutoWhisperApp(rumps.App):
         self._btn_read.set_callback(self._menu_read)
         self._btn_explain = rumps.MenuItem("Explain clipboard")
         self._btn_explain.set_callback(self._menu_explain)
+        self._btn_explain_paste = rumps.MenuItem("Explain → Paste")
+        self._btn_explain_paste.set_callback(self._menu_explain_paste)
+        self._btn_summarize_paste = rumps.MenuItem("Summarize → Paste")
+        self._btn_summarize_paste.set_callback(self._menu_summarize_paste)
 
         self.menu = [
             self._btn_dictate,
@@ -746,8 +750,10 @@ class AutoWhisperApp(rumps.App):
             self._btn_paste_last,
             None,
             self._btn_summarize,
+            self._btn_summarize_paste,
             self._btn_read,
             self._btn_explain,
+            self._btn_explain_paste,
             None,
             [rumps.MenuItem("Engine"), [self._mode_cloud, self._mode_local, self._mode_auto]],
             [rumps.MenuItem("Language"), [self._lang_es, self._lang_en, self._lang_auto]],
@@ -906,21 +912,25 @@ class AutoWhisperApp(rumps.App):
 
     _processing_lock = threading.Lock()
 
-    def _process_selection(self, action: str, use_hotkey: bool = False):
+    def _process_selection(self, action: str, use_hotkey: bool = False, paste_output: bool = False):
         """
         Process text: summarize/read/explain.
         use_hotkey=True: simulate Cmd+C to capture selection (from hotkey)
         use_hotkey=False: read clipboard as-is (from menu, focus already lost)
+        paste_output=True: inject result at cursor instead of speaking it
         """
         if not self._processing_lock.acquire(blocking=False):
-            # If speaking, stop it and release lock
             from auto_whisper.voice_agent import is_speaking, stop_speaking
             if is_speaking():
                 stop_speaking()
             logger.info(f"Already processing, ignoring {action}")
             return
 
+        # Capture paste target now, before the thread steals focus
+        target_app = self._resolve_paste_target() if paste_output else None
+
         def _do():
+            result_text = None
             try:
                 # 1. Get text
                 if use_hotkey:
@@ -935,32 +945,41 @@ class AutoWhisperApp(rumps.App):
                     return
 
                 text = text.strip()
-                logger.info(f"[{action}] Processing {len(text)} chars...")
+                logger.info(f"[{action}{'→paste' if paste_output else ''}] Processing {len(text)} chars...")
 
-                # 2. Process based on action
+                # 2. Process
                 if action == "read":
-                    voice_text = text
+                    result_text = text
                 else:
                     self._set_ui(self.ICON_PROCESSING, f"{action.capitalize()}...")
                     play_sound("Glass")
                     from auto_whisper.text_processor import summarize, explain
-                    voice_text = summarize(text) if action == "summarize" else explain(text)
+                    result_text = summarize(text) if action == "summarize" else explain(text)
 
-                if not voice_text:
+                if not result_text:
                     self._set_ui(self.ICON_IDLE, "Processing failed")
                     return
 
-                # 3. Speak (release lock first so stop works)
-                self._set_ui(self.ICON_SPEAKING, f"Speaking...")
+                if paste_output:
+                    self._last_transcription = result_text
+                    self._set_ui(self.ICON_PROCESSING, "Pasting...")
+                else:
+                    self._set_ui(self.ICON_SPEAKING, "Speaking...")
             finally:
                 self._processing_lock.release()
 
-            # Speaking happens outside the lock — can be stopped anytime
-            try:
-                from auto_whisper.voice_agent import speak
-                speak(voice_text)
-            finally:
-                self._set_ui(self.ICON_IDLE, "Done")
+            # Output happens outside the lock — can be stopped/interrupted anytime
+            if not result_text:
+                return
+            if paste_output:
+                inject_text(result_text, target_app=target_app)
+                self._set_ui(self.ICON_IDLE, f"✓ Pasted ({action})")
+            else:
+                try:
+                    from auto_whisper.voice_agent import speak
+                    speak(result_text)
+                finally:
+                    self._set_ui(self.ICON_IDLE, "Done")
 
         threading.Thread(target=_do, daemon=True).start()
 
@@ -979,6 +998,14 @@ class AutoWhisperApp(rumps.App):
     def _menu_explain(self, _):
         logger.info("Menu: Explain clipboard")
         self._process_selection("explain", use_hotkey=False)
+
+    def _menu_explain_paste(self, _):
+        logger.info("Menu: Explain → Paste")
+        self._process_selection("explain", use_hotkey=False, paste_output=True)
+
+    def _menu_summarize_paste(self, _):
+        logger.info("Menu: Summarize → Paste")
+        self._process_selection("summarize", use_hotkey=False, paste_output=True)
 
     # --- Hotkeys ---
 
