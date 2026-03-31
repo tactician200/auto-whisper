@@ -742,6 +742,8 @@ class AutoWhisperApp(rumps.App):
         self._btn_organize_text.set_callback(self._menu_organize_text)
         self._btn_read = rumps.MenuItem("Read this aloud")
         self._btn_read.set_callback(self._menu_read)
+        self._btn_stop = rumps.MenuItem("■ Stop speaking")
+        self._btn_stop.set_callback(self._menu_stop_speaking)
         self._btn_output_toggle = rumps.MenuItem(self._output_toggle_label())
         self._btn_output_toggle.set_callback(self._toggle_output_mode)
         self._btn_dictate = rumps.MenuItem("Dictate")
@@ -759,9 +761,11 @@ class AutoWhisperApp(rumps.App):
             self._btn_read,
             self._btn_summarize,
             self._btn_explain,
+            self._btn_stop,
             self._btn_output_toggle,
             None,
             self._btn_organize_text,
+            None,
             self._btn_paste_last,
             [rumps.MenuItem("Settings"), [
                 [rumps.MenuItem("Engine"), [self._mode_cloud, self._mode_local, self._mode_auto]],
@@ -1036,6 +1040,15 @@ class AutoWhisperApp(rumps.App):
         paste = self._output_mode == OUTPUT_PASTE
         logger.info(f"Menu: Organize text ({'paste' if paste else 'speak'})")
         self._process_selection("organize_text", use_hotkey=False, paste_output=paste)
+
+    def _menu_stop_speaking(self, _):
+        from auto_whisper.voice_agent import is_speaking, stop_speaking
+        if is_speaking():
+            stop_speaking()
+            logger.info("Menu: Stopped speaking")
+            self._set_ui(self.ICON_IDLE, "Stopped")
+        else:
+            logger.info("Menu: Stop clicked but not speaking")
 
     # --- Hotkeys ---
 
