@@ -94,6 +94,10 @@ INPUT_SYSTEM_DEFAULT = "System Default"
 RECORDING_MODE_DICTATE = "dictate"
 RECORDING_MODE_ORGANIZE = "organize"
 
+# Output modes
+OUTPUT_SPEAK = "Speak"
+OUTPUT_PASTE = "Paste"
+
 # Language modes
 LANG_AUTO = "Auto-detect"
 LANG_ES = "Español"
@@ -695,6 +699,7 @@ class AutoWhisperApp(rumps.App):
         # Default mode
         self._mode = MODE_CLOUD if GROQ_API_KEY_DICTATION else MODE_LOCAL
         self._language = LANG_ES
+        self._output_mode = OUTPUT_SPEAK
 
         # Engine submenu
         self._mode_cloud = rumps.MenuItem(MODE_CLOUD, callback=self._set_mode)
@@ -707,6 +712,11 @@ class AutoWhisperApp(rumps.App):
         self._lang_es = rumps.MenuItem(LANG_ES, callback=self._set_language)
         self._lang_en = rumps.MenuItem(LANG_EN, callback=self._set_language)
         self._update_lang_checks()
+
+        # Output mode submenu
+        self._out_speak = rumps.MenuItem(OUTPUT_SPEAK, callback=self._set_output_mode)
+        self._out_paste = rumps.MenuItem(OUTPUT_PASTE, callback=self._set_output_mode)
+        self._update_output_checks()
 
         # Input device submenu
         self._input_items: dict[str, rumps.MenuItem] = {}
@@ -724,25 +734,20 @@ class AutoWhisperApp(rumps.App):
         self._update_input_checks()
 
         self._usage_item = rumps.MenuItem(usage_tracker.format_bar())
-        self._status_item = rumps.MenuItem(self._format_status_line())
 
         # Build menu items with callbacks assigned explicitly
-        self._btn_dictate = rumps.MenuItem("Dictate (⌘⌘)")
+        self._btn_dictate = rumps.MenuItem("▶  Dictate (⌘⌘)")
         self._btn_dictate.set_callback(self._menu_toggle)
-        self._btn_organize = rumps.MenuItem("Organize ideas")
+        self._btn_organize = rumps.MenuItem("◈  Organize ideas")
         self._btn_organize.set_callback(self._menu_organize)
-        self._btn_paste_last = rumps.MenuItem("Paste Last")
+        self._btn_paste_last = rumps.MenuItem("↩  Paste Last")
         self._btn_paste_last.set_callback(self._paste_last)
-        self._btn_summarize = rumps.MenuItem("Summarize (⌘⌘←)")
+        self._btn_summarize = rumps.MenuItem("∑  Summarize (⌘⌘←)")
         self._btn_summarize.set_callback(self._menu_summarize)
-        self._btn_read = rumps.MenuItem("Read clipboard")
+        self._btn_read = rumps.MenuItem("◌  Read aloud")
         self._btn_read.set_callback(self._menu_read)
-        self._btn_explain = rumps.MenuItem("Explain clipboard")
+        self._btn_explain = rumps.MenuItem("◎  Explain")
         self._btn_explain.set_callback(self._menu_explain)
-        self._btn_explain_paste = rumps.MenuItem("Explain → Paste")
-        self._btn_explain_paste.set_callback(self._menu_explain_paste)
-        self._btn_summarize_paste = rumps.MenuItem("Summarize → Paste")
-        self._btn_summarize_paste.set_callback(self._menu_summarize_paste)
 
         self.menu = [
             self._btn_dictate,
@@ -750,16 +755,17 @@ class AutoWhisperApp(rumps.App):
             self._btn_paste_last,
             None,
             self._btn_summarize,
-            self._btn_summarize_paste,
-            self._btn_read,
             self._btn_explain,
-            self._btn_explain_paste,
+            self._btn_read,
             None,
-            [rumps.MenuItem("Engine"), [self._mode_cloud, self._mode_local, self._mode_auto]],
-            [rumps.MenuItem("Language"), [self._lang_es, self._lang_en, self._lang_auto]],
-            [rumps.MenuItem("Input"), self._input_menu_items],
+            [rumps.MenuItem("Settings"), [
+                [rumps.MenuItem("Output"), [self._out_speak, self._out_paste]],
+                None,
+                [rumps.MenuItem("Engine"), [self._mode_cloud, self._mode_local, self._mode_auto]],
+                [rumps.MenuItem("Language"), [self._lang_es, self._lang_en, self._lang_auto]],
+                [rumps.MenuItem("Input"), self._input_menu_items],
+            ]],
             self._usage_item,
-            self._status_item,
         ]
         self._setup_hotkey()
 
@@ -789,6 +795,15 @@ class AutoWhisperApp(rumps.App):
         self._lang_auto.state = self._language == LANG_AUTO
         self._lang_es.state = self._language == LANG_ES
         self._lang_en.state = self._language == LANG_EN
+
+    def _set_output_mode(self, sender):
+        self._output_mode = sender.title
+        self._update_output_checks()
+        logger.info(f"Output mode changed to: {self._output_mode}")
+
+    def _update_output_checks(self):
+        self._out_speak.state = self._output_mode == OUTPUT_SPEAK
+        self._out_paste.state = self._output_mode == OUTPUT_PASTE
 
     def _refresh_input_devices(self):
         """Re-enumerate audio input devices and rebuild the Input submenu."""
@@ -984,8 +999,9 @@ class AutoWhisperApp(rumps.App):
         threading.Thread(target=_do, daemon=True).start()
 
     def _menu_summarize(self, _):
-        logger.info("Menu: Summarize clipboard")
-        self._process_selection("summarize", use_hotkey=False)
+        paste = self._output_mode == OUTPUT_PASTE
+        logger.info(f"Menu: Summarize clipboard ({'paste' if paste else 'speak'})")
+        self._process_selection("summarize", use_hotkey=False, paste_output=paste)
 
     def _menu_organize(self, _):
         logger.info("Menu: Organize ideas")
@@ -996,16 +1012,9 @@ class AutoWhisperApp(rumps.App):
         self._process_selection("read", use_hotkey=False)
 
     def _menu_explain(self, _):
-        logger.info("Menu: Explain clipboard")
-        self._process_selection("explain", use_hotkey=False)
-
-    def _menu_explain_paste(self, _):
-        logger.info("Menu: Explain → Paste")
-        self._process_selection("explain", use_hotkey=False, paste_output=True)
-
-    def _menu_summarize_paste(self, _):
-        logger.info("Menu: Summarize → Paste")
-        self._process_selection("summarize", use_hotkey=False, paste_output=True)
+        paste = self._output_mode == OUTPUT_PASTE
+        logger.info(f"Menu: Explain clipboard ({'paste' if paste else 'speak'})")
+        self._process_selection("explain", use_hotkey=False, paste_output=paste)
 
     # --- Hotkeys ---
 
@@ -1040,9 +1049,10 @@ class AutoWhisperApp(rumps.App):
                                 stop_speaking()
                                 self._set_ui(self.ICON_IDLE, "Stopped")
                             else:
-                                logger.info("Double-tap Left ⌘ → summarize")
+                                paste = self._output_mode == OUTPUT_PASTE
+                                logger.info(f"Double-tap Left ⌘ → summarize ({'paste' if paste else 'speak'})")
                                 play_sound("Tink")
-                                self._process_selection("summarize", use_hotkey=True)
+                                self._process_selection("summarize", use_hotkey=True, paste_output=paste)
                             self._last_lcmd_time = 0
                         else:
                             self._last_lcmd_time = now
