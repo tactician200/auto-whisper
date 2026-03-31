@@ -13,7 +13,7 @@ Usage:
 
 import sys
 from pathlib import Path
-from voice_agent import speak, DEFAULT_BACKEND
+from auto_whisper.voice_agent import speak, DEFAULT_BACKEND
 
 
 def main():
@@ -58,7 +58,7 @@ def main():
         sys.exit(1)
 
     if split_mode:
-        from text_processor import summarize
+        from auto_whisper.text_processor import summarize
         voice_text, data_text = summarize(text)
         if data_text:
             print(data_text)

@@ -18,11 +18,12 @@ echo ""
 INSTALL_DIR="$(cd "$(dirname "$0")" && pwd)"
 VENV_DIR="$INSTALL_DIR/.venv"
 ENV_FILE="$INSTALL_DIR/.env"
-LOGS_DIR="$HOME/MeetingTranscripts/logs"
+AW_LOGS_DIR="$HOME/Library/Logs/auto-whisper"
+MI_LOGS_DIR="$HOME/MeetingTranscripts/logs"
 PLIST_LABEL="com.auto-whisper"
 PLIST_SRC="$INSTALL_DIR/$PLIST_LABEL.plist"
 PLIST_DST="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
-MEETING_PLIST_LABEL="com.meetingtranscriber"
+MEETING_PLIST_LABEL="com.meetings-intel"
 MEETING_PLIST_SRC="$INSTALL_DIR/$MEETING_PLIST_LABEL.plist"
 MEETING_PLIST_DST="$HOME/Library/LaunchAgents/$MEETING_PLIST_LABEL.plist"
 
@@ -92,7 +93,8 @@ echo "  Installing dependencies..."
 echo "  ✓ Dependencies installed"
 
 # ─── Create directories ───
-mkdir -p "$LOGS_DIR"
+mkdir -p "$AW_LOGS_DIR"
+mkdir -p "$MI_LOGS_DIR"
 mkdir -p "$HOME/MeetingInbox"
 mkdir -p "$HOME/MeetingDone"
 mkdir -p "$HOME/MeetingTranscripts/notes"
@@ -178,9 +180,9 @@ cat > "$PLIST_SRC" << PLIST
         <false/>
     </dict>
     <key>StandardOutPath</key>
-    <string>$LOGS_DIR/auto-whisper.out</string>
+    <string>$AW_LOGS_DIR/auto-whisper.out</string>
     <key>StandardErrorPath</key>
-    <string>$LOGS_DIR/auto-whisper.err</string>
+    <string>$AW_LOGS_DIR/auto-whisper.err</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PYTHONPATH</key>
@@ -214,9 +216,9 @@ cat > "$MEETING_PLIST_SRC" << MEETING_PLIST
         <string>$HOME/MeetingInbox</string>
     </array>
     <key>StandardOutPath</key>
-    <string>$LOGS_DIR/meetingtranscriber.out</string>
+    <string>$MI_LOGS_DIR/meetings-intel.out</string>
     <key>StandardErrorPath</key>
-    <string>$LOGS_DIR/meetingtranscriber.err</string>
+    <string>$MI_LOGS_DIR/meetings-intel.err</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PYTHONPATH</key>
@@ -274,7 +276,7 @@ if [[ ! -f "\$PYTHON" ]]; then
     exit 1
 fi
 
-if pgrep -f "dictation_daemon.py" > /dev/null 2>&1; then
+if pgrep -f "auto_whisper/main.py" > /dev/null 2>&1; then
     osascript -e 'display dialog "auto-whisper is already running.\\nLook for the ◎ icon in the menu bar." with title "auto-whisper" buttons {"OK"} with icon note'
     exit 0
 fi
@@ -282,7 +284,7 @@ fi
 export PYTHONPATH="\$APP_DIR"
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:\$PATH"
 export LANG="en_US.UTF-8"
-exec "\$PYTHON" "\$APP_DIR/dictation_daemon.py"
+exec "\$PYTHON" "\$APP_DIR/auto_whisper/main.py"
 LAUNCHER
 
 chmod +x "$APP_DIR/Contents/MacOS/launcher"
@@ -341,7 +343,7 @@ if [[ "$START" =~ ^[Yy] ]]; then
         echo "  │  MeetingsIntel: drop audio in ~/MeetingInbox│"
         echo "  └─────────────────────────────────────────────┘"
     else
-        echo "  ✗ Failed to start. Check: $LOGS_DIR/auto-whisper.err"
+        echo "  ✗ Failed to start. Check: $AW_LOGS_DIR/auto-whisper.err"
     fi
 else
     ln -sf "$PLIST_SRC" "$PLIST_DST"
@@ -356,7 +358,7 @@ echo ""
 echo "  Commands:"
 echo "    Start:     launchctl load $PLIST_DST"
 echo "    Stop:      launchctl unload $PLIST_DST"
-echo "    Logs:      tail -f $LOGS_DIR/dictation.log"
+echo "    Logs:      tail -f $AW_LOGS_DIR/dictation.log"
 echo "    Meetings:  launchctl kickstart -k gui/$(id -u)/$MEETING_PLIST_LABEL"
 echo "    Config:    nano $ENV_FILE"
 echo "    Reinstall: cd $INSTALL_DIR && bash install.sh"

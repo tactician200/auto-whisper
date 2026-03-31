@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-exec "/Users/mantra/src/meeting-transcriber/ingest_meeting_recording.sh" "$@"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+exec "$SCRIPT_DIR/ingest_meeting_recording.sh" "$@"

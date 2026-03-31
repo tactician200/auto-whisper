@@ -41,15 +41,15 @@ from Quartz import (
 )
 from shared.config import (
     WHISPER_BIN, WHISPER_MODEL,
-    SAMPLE_RATE, LOGS, GROQ_API_KEY_DICTATION,
+    SAMPLE_RATE, AUTO_WHISPER_LOGS, GROQ_API_KEY_DICTATION,
 )
 
-LOGS.mkdir(parents=True, exist_ok=True)
+AUTO_WHISPER_LOGS.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler(LOGS / "dictation.log", encoding="utf-8"),
+        logging.FileHandler(AUTO_WHISPER_LOGS / "dictation.log", encoding="utf-8"),
         logging.StreamHandler(sys.stdout),
     ],
 )
@@ -415,7 +415,7 @@ class UsageTracker:
     """Track daily Groq API usage against free tier limits."""
     DAILY_AUDIO_LIMIT = 28800  # seconds (8 hours) — Groq free tier
     DAILY_REQUEST_LIMIT = 2000
-    STATE_PATH = LOGS / "usage_tracker.json"
+    STATE_PATH = AUTO_WHISPER_LOGS / "usage_tracker.json"
     LOG_USAGE_RE = re.compile(r"Groq usage: Usage:\s+.*?(\d+)/(\d+)min")
 
     def __init__(self):
@@ -445,7 +445,7 @@ class UsageTracker:
 
     def _load_today_from_logs(self):
         today_key = self._today_key()
-        log_path = LOGS / "dictation.log"
+        log_path = AUTO_WHISPER_LOGS / "dictation.log"
         self._date = today_key
         self.audio_seconds = 0.0
         self.requests = 0
@@ -659,6 +659,7 @@ class AutoWhisperApp(rumps.App):
         self.recording = False
         self.audio_frames = []
         self._frames_lock = threading.Lock()
+        self._recording_lock = threading.Lock()
         self.stream = None
         self._target_app = None
         self._monitor = None
@@ -712,6 +713,9 @@ class AutoWhisperApp(rumps.App):
             item = rumps.MenuItem(label, callback=self._set_input_device)
             self._input_menu_items.append(item)
             self._input_items[label] = item
+        self._input_refresh = rumps.MenuItem("↻ Refresh devices", callback=self._on_refresh_input)
+        self._input_menu_items.append(None)  # separator
+        self._input_menu_items.append(self._input_refresh)
         self._update_input_checks()
 
         self._usage_item = rumps.MenuItem(usage_tracker.format_bar())
@@ -775,30 +779,95 @@ class AutoWhisperApp(rumps.App):
         self._lang_es.state = self._language == LANG_ES
         self._lang_en.state = self._language == LANG_EN
 
+    def _refresh_input_devices(self):
+        """Re-enumerate audio input devices and rebuild the Input submenu."""
+        new_devices = list_input_devices()
+        self._input_device_options = [(INPUT_SYSTEM_DEFAULT, None), *new_devices]
+
+        # Check if currently selected device still exists
+        if self._input_device_index is not None:
+            still_exists = any(
+                idx == self._input_device_index for _, idx in new_devices
+            )
+            if not still_exists:
+                logger.warning(
+                    f"Previously selected device '{self._input_device_label}' "
+                    f"(index {self._input_device_index}) no longer available, "
+                    f"resetting to {INPUT_SYSTEM_DEFAULT}"
+                )
+                self._input_device_index = None
+                self._input_device_label = INPUT_SYSTEM_DEFAULT
+
+        # Rebuild submenu items
+        input_menu = self.menu.get("Input")
+        if input_menu:
+            input_menu.clear()
+            self._input_items = {}
+
+            # System Default
+            self._input_system_default = rumps.MenuItem(
+                INPUT_SYSTEM_DEFAULT, callback=self._set_input_device
+            )
+            self._input_items[INPUT_SYSTEM_DEFAULT] = self._input_system_default
+            input_menu[INPUT_SYSTEM_DEFAULT] = self._input_system_default
+
+            # Device items — use unique keys to handle duplicate names
+            for label, index in new_devices:
+                menu_key = f"{label}||{index}"
+                item = rumps.MenuItem(label, callback=self._set_input_device)
+                item._aw_device_index = index  # store index directly on the item
+                self._input_items[menu_key] = item
+                input_menu[menu_key] = item
+
+            # Separator + refresh button
+            input_menu["_sep"] = None
+            self._input_refresh = rumps.MenuItem(
+                "↻ Refresh devices", callback=self._on_refresh_input
+            )
+            input_menu["↻ Refresh devices"] = self._input_refresh
+
+        self._update_input_checks()
+        logger.info(f"Input devices refreshed: {len(new_devices)} found")
+
+    def _on_refresh_input(self, _):
+        self._refresh_input_devices()
+        self._set_ui(self.title, f"Devices refreshed ({len(self._input_device_options) - 1})")
+
     def _set_input_device(self, sender):
         label = sender.title
         if label == INPUT_SYSTEM_DEFAULT:
             self._input_device_index = None
             self._input_device_label = INPUT_SYSTEM_DEFAULT
         else:
-            selected = next(
-                ((device_label, device_index) for device_label, device_index in self._input_device_options if device_label == label),
-                None,
-            )
-            if selected is None:
-                self._set_ui(self.title, "Input device unavailable")
-                play_sound("Basso")
-                return
-            self._input_device_label = selected[0]
-            self._input_device_index = selected[1]
+            # Use stored device index if available (handles duplicate names)
+            device_index = getattr(sender, '_aw_device_index', None)
+            if device_index is not None:
+                self._input_device_label = label
+                self._input_device_index = device_index
+            else:
+                # Fallback: search by label in options list
+                selected = next(
+                    ((dl, di) for dl, di in self._input_device_options if dl == label),
+                    None,
+                )
+                if selected is None:
+                    self._set_ui(self.title, "Input device unavailable")
+                    play_sound("Basso")
+                    return
+                self._input_device_label = selected[0]
+                self._input_device_index = selected[1]
 
         self._update_input_checks()
         self._set_ui(self.title, self._format_status_line())
-        logger.info(f"Input device changed to: {self._input_device_label}")
+        logger.info(f"Input device changed to: {self._input_device_label} (index: {self._input_device_index})")
 
     def _update_input_checks(self):
-        for label, item in self._input_items.items():
-            item.state = label == self._input_device_label
+        for key, item in self._input_items.items():
+            if key == INPUT_SYSTEM_DEFAULT:
+                item.state = self._input_device_index is None
+            else:
+                device_index = getattr(item, '_aw_device_index', None)
+                item.state = (device_index is not None and device_index == self._input_device_index)
 
     def _remember_paste_target(self, app):
         if app and not is_own_app(app):
@@ -840,7 +909,7 @@ class AutoWhisperApp(rumps.App):
         """
         if not self._processing_lock.acquire(blocking=False):
             # If speaking, stop it and release lock
-            from voice_agent import is_speaking, stop_speaking
+            from auto_whisper.voice_agent import is_speaking, stop_speaking
             if is_speaking():
                 stop_speaking()
             logger.info(f"Already processing, ignoring {action}")
@@ -869,7 +938,7 @@ class AutoWhisperApp(rumps.App):
                 else:
                     self._set_ui(self.ICON_PROCESSING, f"{action.capitalize()}...")
                     play_sound("Glass")
-                    from text_processor import summarize, explain
+                    from auto_whisper.text_processor import summarize, explain
                     voice_text = summarize(text) if action == "summarize" else explain(text)
 
                 if not voice_text:
@@ -883,7 +952,7 @@ class AutoWhisperApp(rumps.App):
 
             # Speaking happens outside the lock — can be stopped anytime
             try:
-                from voice_agent import speak
+                from auto_whisper.voice_agent import speak
                 speak(voice_text)
             finally:
                 self._set_ui(self.ICON_IDLE, "Done")
@@ -933,7 +1002,7 @@ class AutoWhisperApp(rumps.App):
                     if lcmd_down and not self._lcmd_was_down:
                         now = time.time()
                         if now - self._last_lcmd_time < DOUBLE_TAP_WINDOW:
-                            from voice_agent import is_speaking, stop_speaking
+                            from auto_whisper.voice_agent import is_speaking, stop_speaking
                             if is_speaking():
                                 logger.info("Double-tap Left ⌘ → stop speaking")
                                 stop_speaking()
@@ -956,10 +1025,11 @@ class AutoWhisperApp(rumps.App):
         logger.info("Hotkeys: Right ⌘⌘ = dictate, Left ⌘⌘ = summarize")
 
     def _toggle_recording(self, recording_mode: str = RECORDING_MODE_DICTATE):
-        if self.recording:
-            self._stop_and_transcribe()
-        else:
-            self._start_recording(recording_mode)
+        with self._recording_lock:
+            if self.recording:
+                self._stop_and_transcribe()
+            else:
+                self._start_recording(recording_mode)
 
     def _start_recording(self, recording_mode: str = RECORDING_MODE_DICTATE):
         if self.recording:
@@ -985,9 +1055,13 @@ class AutoWhisperApp(rumps.App):
             f"Initializing mic... (target: {target_name}, mode: {self._mode}, action: {recording_mode})"
         )
 
+        # Capture device selection before entering the background thread
+        initial_device_index = self._input_device_index
+        initial_device_label = self._input_device_label
+
         def record():
             try:
-                stream_device = self._input_device_index
+                stream_device = initial_device_index
                 try:
                     input_device = (
                         sd.query_devices(stream_device, kind="input")
@@ -999,17 +1073,19 @@ class AutoWhisperApp(rumps.App):
                         logger.warning(f"Could not inspect default input device: {device_error}")
                         raise
                     logger.warning(
-                        f"Selected input unavailable ({self._input_device_label}); "
+                        f"Selected input unavailable ({initial_device_label}); "
                         f"falling back to {INPUT_SYSTEM_DEFAULT}: {device_error}"
                     )
                     stream_device = None
                     self._input_device_index = None
                     self._input_device_label = INPUT_SYSTEM_DEFAULT
-                    self._update_input_checks()
+                    # UI mutations must happen on the main thread
+                    from PyObjCTools import AppHelper
+                    AppHelper.callAfter(self._update_input_checks)
                     input_device = sd.query_devices(kind="input")
 
                 route_label = (
-                    self._input_device_label
+                    initial_device_label
                     if stream_device is not None
                     else INPUT_SYSTEM_DEFAULT
                 )
@@ -1057,7 +1133,7 @@ class AutoWhisperApp(rumps.App):
                     and not self._silence_stop_fired):
                 self._silence_stop_fired = True
                 logger.info(f"Silence auto-stop after {silence_duration:.1f}s silence ({elapsed:.1f}s total)")
-                threading.Thread(target=self._stop_and_transcribe, daemon=True).start()
+                threading.Thread(target=self._locked_stop_and_transcribe, daemon=True).start()
                 return
 
             # Max duration guard — MUST run in separate thread to avoid deadlock
@@ -1066,9 +1142,16 @@ class AutoWhisperApp(rumps.App):
                 self._max_duration_stop_fired = True
                 logger.warning(f"Max recording duration ({MAX_RECORDING_SECONDS}s) reached, auto-stopping")
                 play_sound("Basso")
-                threading.Thread(target=self._stop_and_transcribe, daemon=True).start()
+                threading.Thread(target=self._locked_stop_and_transcribe, daemon=True).start()
+
+    def _locked_stop_and_transcribe(self):
+        """Thread-safe wrapper for auto-stop paths (silence, max duration)."""
+        with self._recording_lock:
+            self._stop_and_transcribe()
 
     def _stop_and_transcribe(self):
+        if not self.recording:
+            return
         self.recording = False
         recording_mode = self._recording_mode
 
@@ -1140,7 +1223,7 @@ class AutoWhisperApp(rumps.App):
                 if recording_mode == RECORDING_MODE_ORGANIZE:
                     self._set_ui(self.ICON_PROCESSING, "Organizing ideas...")
                     try:
-                        from text_processor import organize_ideas
+                        from auto_whisper.text_processor import organize_ideas
                         organized = organize_ideas(text)
                     except Exception as e:
                         logger.error(f"Idea organization failed: {e}")

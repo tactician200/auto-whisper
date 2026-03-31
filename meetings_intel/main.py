@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from transcribe_meeting import main
+from meetings_intel.transcribe_meeting import main
 
 
 if __name__ == "__main__":

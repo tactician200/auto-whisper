@@ -2,7 +2,7 @@
 set -euo pipefail
 
 INBOX="${HOME}/MeetingInbox"
-MEETING_AGENT="gui/$(id -u)/com.meetingtranscriber"
+MEETING_AGENT="gui/$(id -u)/com.meetings-intel"
 
 usage() {
     cat <<EOF

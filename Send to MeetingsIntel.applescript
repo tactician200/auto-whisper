@@ -3,7 +3,7 @@ on run
 end run
 
 on open droppedItems
-	set importerPath to "/Users/mantra/src/meeting-transcriber/send_to_meetings_intel.sh"
+	set importerPath to "/Users/mantra/src/auto-whisper/send_to_meetings_intel.sh"
 	set shellCommand to "bash " & quoted form of importerPath
 
 	repeat with anItem in droppedItems

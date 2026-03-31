@@ -17,7 +17,8 @@ HOME = Path.home()
 INBOX = HOME / "MeetingInbox"
 DONE = HOME / "MeetingDone"
 TRANSCRIPTS = HOME / "MeetingTranscripts"
-LOGS = TRANSCRIPTS / "logs"
+LOGS = TRANSCRIPTS / "logs"  # meetings-intel logs
+AUTO_WHISPER_LOGS = HOME / "Library" / "Logs" / "auto-whisper"  # dictation logs
 
 # Output notes folder (open as Obsidian vault if desired)
 NOTES_DIR = HOME / "MeetingTranscripts" / "notes"
