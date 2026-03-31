@@ -531,8 +531,8 @@ class UsageTracker:
         full = int(filled)
         half = 1 if (filled - full) >= 0.5 else 0
         empty = CELLS - full - half
-        bar = "█" * full + ("▒" if half else "") + "░" * empty
-        return f"{bar} {used_min:.0f}m"
+        bar = "◼" * full + ("◻" if half else "") + "·" * empty
+        return f"{bar} {used_min:.0f}m · {pct:.0f}%"
 
     @property
     def is_near_limit(self) -> bool:
@@ -744,7 +744,7 @@ class AutoWhisperApp(rumps.App):
         self._btn_read.set_callback(self._menu_read)
         self._btn_output_toggle = rumps.MenuItem(self._output_toggle_label())
         self._btn_output_toggle.set_callback(self._toggle_output_mode)
-        self._btn_dictate = rumps.MenuItem("Dictate                     ⌘⌘")
+        self._btn_dictate = rumps.MenuItem("Dictate")
         self._btn_dictate.set_callback(self._menu_toggle)
         self._btn_organize = rumps.MenuItem("Organize what I say")
         self._btn_organize.set_callback(self._menu_organize)
@@ -753,15 +753,15 @@ class AutoWhisperApp(rumps.App):
         self._update_action_titles()
 
         self.menu = [
-            self._btn_summarize,
-            self._btn_explain,
-            self._btn_organize_text,
-            self._btn_read,
-            None,
-            self._btn_output_toggle,
-            None,
             self._btn_dictate,
             self._btn_organize,
+            None,
+            self._btn_read,
+            self._btn_summarize,
+            self._btn_explain,
+            self._btn_output_toggle,
+            None,
+            self._btn_organize_text,
             self._btn_paste_last,
             [rumps.MenuItem("Settings"), [
                 [rumps.MenuItem("Engine"), [self._mode_cloud, self._mode_local, self._mode_auto]],
@@ -801,13 +801,13 @@ class AutoWhisperApp(rumps.App):
 
     def _output_toggle_label(self) -> str:
         if self._output_mode == OUTPUT_SPEAK:
-            return "⇄  SPEAK │ paste"
-        return "⇄  speak │ PASTE"
+            return "Speak ●━━○ Paste"
+        return "Speak ○━━● Paste"
 
     def _update_action_titles(self):
         """Update action titles to reflect current output mode."""
         mode = "speak" if self._output_mode == OUTPUT_SPEAK else "paste"
-        self._btn_summarize.title = f"Summarize this → {mode}    ⌘⌘←"
+        self._btn_summarize.title = f"Summarize this → {mode}"
         self._btn_explain.title = f"Explain this → {mode}"
 
     def _toggle_output_mode(self, _):
