@@ -733,31 +733,26 @@ class AutoWhisperApp(rumps.App):
 
         self._usage_item = rumps.MenuItem(usage_tracker.format_bar())
 
-        # Build menu items with callbacks assigned explicitly
-        # I/O indicators: ◁ = voice in, ▷ = voice out, □ = text in/out
-        self._btn_dictate = rumps.MenuItem("▶  Dictate (⌘⌘)  ◁→□")
-        self._btn_dictate.set_callback(self._menu_toggle)
-        self._btn_organize = rumps.MenuItem("◈  Organize ideas  ◁→□")
-        self._btn_organize.set_callback(self._menu_organize)
-        self._btn_paste_last = rumps.MenuItem("↩  Paste Last")
-        self._btn_paste_last.set_callback(self._paste_last)
+        # Build menu — priority stack: clipboard actions first (why you open the menu)
         self._btn_summarize = rumps.MenuItem("")
         self._btn_summarize.set_callback(self._menu_summarize)
-        self._btn_read = rumps.MenuItem("◌  Read aloud  □→▷")
-        self._btn_read.set_callback(self._menu_read)
         self._btn_explain = rumps.MenuItem("")
         self._btn_explain.set_callback(self._menu_explain)
-        self._btn_organize_text = rumps.MenuItem("")
+        self._btn_organize_text = rumps.MenuItem("Organize this text")
         self._btn_organize_text.set_callback(self._menu_organize_text)
+        self._btn_read = rumps.MenuItem("Read this aloud")
+        self._btn_read.set_callback(self._menu_read)
         self._btn_output_toggle = rumps.MenuItem(self._output_toggle_label())
         self._btn_output_toggle.set_callback(self._toggle_output_mode)
+        self._btn_dictate = rumps.MenuItem("Dictate                     ⌘⌘")
+        self._btn_dictate.set_callback(self._menu_toggle)
+        self._btn_organize = rumps.MenuItem("Organize what I say")
+        self._btn_organize.set_callback(self._menu_organize)
+        self._btn_paste_last = rumps.MenuItem("↩ Re-paste last")
+        self._btn_paste_last.set_callback(self._paste_last)
         self._update_action_titles()
 
         self.menu = [
-            self._btn_dictate,
-            self._btn_organize,
-            self._btn_paste_last,
-            None,
             self._btn_summarize,
             self._btn_explain,
             self._btn_organize_text,
@@ -765,6 +760,9 @@ class AutoWhisperApp(rumps.App):
             None,
             self._btn_output_toggle,
             None,
+            self._btn_dictate,
+            self._btn_organize,
+            self._btn_paste_last,
             [rumps.MenuItem("Settings"), [
                 [rumps.MenuItem("Engine"), [self._mode_cloud, self._mode_local, self._mode_auto]],
                 [rumps.MenuItem("Language"), [self._lang_es, self._lang_en, self._lang_auto]],
@@ -802,14 +800,15 @@ class AutoWhisperApp(rumps.App):
         self._lang_en.state = self._language == LANG_EN
 
     def _output_toggle_label(self) -> str:
-        return f"⇄  Output: {self._output_mode}"
+        if self._output_mode == OUTPUT_SPEAK:
+            return "⇄  SPEAK │ paste"
+        return "⇄  speak │ PASTE"
 
     def _update_action_titles(self):
-        """Update action item titles with I/O indicators based on output mode."""
-        out = "□" if self._output_mode == OUTPUT_PASTE else "▷"
-        self._btn_summarize.title = f"∑  Summarize (⌘⌘←)  □→{out}"
-        self._btn_explain.title = f"◎  Explain  □→{out}"
-        self._btn_organize_text.title = f"◻  Organize text  □→{out}"
+        """Update action titles to reflect current output mode."""
+        mode = "speak" if self._output_mode == OUTPUT_SPEAK else "paste"
+        self._btn_summarize.title = f"Summarize this → {mode}    ⌘⌘←"
+        self._btn_explain.title = f"Explain this → {mode}"
 
     def _toggle_output_mode(self, _):
         self._output_mode = OUTPUT_PASTE if self._output_mode == OUTPUT_SPEAK else OUTPUT_SPEAK
