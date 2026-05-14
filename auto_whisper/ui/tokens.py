@@ -1,9 +1,28 @@
 """Design tokens for the floating HUD UI. Single source of truth."""
-from AppKit import NSColor, NSFont, NSVisualEffectMaterialPopover
+from AppKit import (
+    NSColor,
+    NSFont,
+    NSVisualEffectMaterialHUDWindow,
+    NSVisualEffectMaterialPopover,
+)
 
 ACCENT          = NSColor.colorWithRed_green_blue_alpha_(0.486, 0.361, 1.0, 1.0)  # #7C5CFF violet
 PRIVACY_ACCENT  = NSColor.colorWithRed_green_blue_alpha_(0.20, 0.70, 0.45, 1.0)  # privacy teal-green
-BG_MATERIAL     = NSVisualEffectMaterialPopover  # frosted glass used by Control Center & menubar popovers — more see-through than HUDWindow
+BG_MATERIAL     = NSVisualEffectMaterialPopover  # kept for backward compat; new HUD uses GLASS_MATERIAL
+
+# Liquid-glass tokens — extracted 1:1 from the codepen liquid-glass-ui-kit
+# .glass base class (blur 18px, bg 12%, border 25%). See:
+#   ~/Claude/projects/auto-whisper/.design/UI samples/codepen-liquid-glass/css.md
+# Treat these as the single source of truth for the HUD's glass treatment.
+GLASS_MATERIAL              = NSVisualEffectMaterialHUDWindow  # denser frost than Popover
+GLASS_ALPHA                 = 0.60   # backdrop strength (was 0.18 — way too diluted)
+GLASS_BG_TINT_ALPHA         = 0.12   # rgba(255,255,255,.12) — --glass-white
+GLASS_BORDER_ALPHA          = 0.25   # rgba(255,255,255,.25) — --glass-border (1px hairline)
+GLASS_TOP_HIGHLIGHT_ALPHA   = 0.30   # inset 0 1px 0 rgba(255,255,255,.3)
+GLASS_REFLECTION_ALPHA      = 0.40   # 135deg gradient start — rgba(255,255,255,.4)
+GLASS_DROP_SHADOW_ALPHA     = 0.28   # 0 8px 32px rgba(0,0,0,.28)
+GLASS_DROP_SHADOW_RADIUS    = 32.0
+GLASS_DROP_SHADOW_OFFSET_Y  = -8.0   # AppKit y axis is inverted; CSS 8px down = -8 in CG
 
 HUD_WIDTH       = 300
 HUD_HEIGHT      = 110

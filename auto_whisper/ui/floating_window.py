@@ -34,6 +34,9 @@ from PyObjCTools import AppHelper
 from auto_whisper.ui.tokens import (
     HUD_WIDTH, HUD_HEIGHT, HUD_TOP_INSET, HUD_RIGHT_INSET, HUD_ALPHA,
     BG_MATERIAL,
+    GLASS_MATERIAL, GLASS_ALPHA, GLASS_BG_TINT_ALPHA, GLASS_BORDER_ALPHA,
+    GLASS_TOP_HIGHLIGHT_ALPHA, GLASS_REFLECTION_ALPHA,
+    GLASS_DROP_SHADOW_ALPHA, GLASS_DROP_SHADOW_RADIUS, GLASS_DROP_SHADOW_OFFSET_Y,
     FADE_IN_MS, FADE_OUT_MS, ARRIVAL_SLIDE,
     ACCENT, PRIVACY_ACCENT,
     PADDING_LR, TOP_ROW_HEIGHT, WAVEFORM_HEIGHT, INNER_GAP,
@@ -114,17 +117,29 @@ class FloatingHUD:
         panel.setIgnoresMouseEvents_(True)
         panel.setOpaque_(False)
         panel.setBackgroundColor_(NSColor.clearColor())
-        panel.setHasShadow_(False)
+        # Native window drop shadow — matches the codepen .glass box-shadow
+        # outer component (0 8px 32px rgba(0,0,0,0.28)). AppKit also tweaks
+        # the shadow when the panel resizes, so this stays consistent through
+        # the show/hide animation.
+        panel.setHasShadow_(True)
 
-        # Two-layer composition so we can dial down the background opacity
-        # without fading the chips/waveform/picker.
+        # Liquid-glass composition — five stacked layers, all under the chips
+        # and waveform so they remain crisp on top. See the codepen
+        # .glass base class for the visual reference; tokens are 1:1.
         #
-        # content_view: plain NSView with rounded corners that holds everything.
-        # glass_view:   NSVisualEffectView underneath, alpha 0.18 — provides
-        #               the frosted-blur look at near-15-20% opacity.
-        # All other UI views are siblings of glass_view inside content_view,
-        # so their full opacity is unaffected by the glass alpha.
+        # z-order, bottom to top:
+        #   1. content_view (rounded clip mask)
+        #   2. glass_view       — NSVisualEffectView, HUDWindow material, behindWindow blend
+        #   3. bg_tint_layer    — solid white α=0.12 (the --glass-white tint)
+        #   4. reflection_layer — 135° diagonal gradient (white α=0.40 → 0 at 50%)
+        #   5. top_highlight    — 1px white α=0.30 strip at the very top
+        #   6. rim_layer        — 1px CAShapeLayer stroke α=0.25 inset 0.5px
+        # Chips, REC dot, waveform, etc., sit above all of these as NSView
+        # subviews of content_view.
         from AppKit import NSViewWidthSizable, NSViewHeightSizable
+        from Quartz import CAGradientLayer, CALayer, CAShapeLayer, CGPathCreateWithRoundedRect
+        from Quartz.CoreGraphics import CGRectMake
+
         content_view = NSView.alloc().initWithFrame_(rect)
         content_view.setWantsLayer_(True)
         content_view.layer().setCornerRadius_(16)
@@ -132,12 +147,69 @@ class FloatingHUD:
         content_view.layer().setBackgroundColor_(NSColor.clearColor().CGColor())
 
         glass_view = NSVisualEffectView.alloc().initWithFrame_(rect)
-        glass_view.setMaterial_(BG_MATERIAL)
+        glass_view.setMaterial_(GLASS_MATERIAL)
         glass_view.setBlendingMode_(NSVisualEffectBlendingModeBehindWindow)
         glass_view.setState_(NSVisualEffectStateActive)
         glass_view.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
-        glass_view.setAlphaValue_(0.18)
+        glass_view.setAlphaValue_(GLASS_ALPHA)
         content_view.addSubview_(glass_view)
+
+        # --- Liquid-glass overlay stack on the content_view's layer ---
+        cv_layer = content_view.layer()
+
+        # 3. white tint (the --glass-white characteristic body of the glass)
+        bg_tint_layer = CALayer.layer()
+        bg_tint_layer.setFrame_(rect)
+        bg_tint_layer.setBackgroundColor_(
+            NSColor.whiteColor().colorWithAlphaComponent_(GLASS_BG_TINT_ALPHA).CGColor()
+        )
+        cv_layer.addSublayer_(bg_tint_layer)
+
+        # 4. 135° diagonal reflection — top-left bright, fades to nothing by 50%
+        reflection_layer = CAGradientLayer.layer()
+        reflection_layer.setFrame_(rect)
+        reflection_layer.setColors_([
+            NSColor.whiteColor().colorWithAlphaComponent_(GLASS_REFLECTION_ALPHA).CGColor(),
+            NSColor.whiteColor().colorWithAlphaComponent_(0.0).CGColor(),
+        ])
+        reflection_layer.setLocations_([0.0, 0.5])
+        # CSS 135deg = top-left → bottom-right. In CALayer coords that's
+        # startPoint=(0,1) → endPoint=(1,0) (y is bottom-up).
+        reflection_layer.setStartPoint_((0.0, 1.0))
+        reflection_layer.setEndPoint_((1.0, 0.0))
+        cv_layer.addSublayer_(reflection_layer)
+
+        # 5. top highlight — 1px white strip at the very top edge (inset 0 1px 0)
+        top_highlight = CALayer.layer()
+        top_highlight.setFrame_(NSMakeRect(0, HUD_HEIGHT - 1, HUD_WIDTH, 1))
+        top_highlight.setBackgroundColor_(
+            NSColor.whiteColor().colorWithAlphaComponent_(GLASS_TOP_HIGHLIGHT_ALPHA).CGColor()
+        )
+        cv_layer.addSublayer_(top_highlight)
+
+        # 6. rim border — 1px hairline stroke around the rounded rect
+        rim_layer = CAShapeLayer.layer()
+        rim_layer.setFrame_(rect)
+        # Inset 0.5px so the 1px stroke sits exactly on the edge after the
+        # corner-radius clip; otherwise half the stroke gets clipped.
+        rim_path = CGPathCreateWithRoundedRect(
+            CGRectMake(0.5, 0.5, HUD_WIDTH - 1.0, HUD_HEIGHT - 1.0),
+            15.5, 15.5, None,
+        )
+        rim_layer.setPath_(rim_path)
+        rim_layer.setFillColor_(NSColor.clearColor().CGColor())
+        rim_layer.setStrokeColor_(
+            NSColor.whiteColor().colorWithAlphaComponent_(GLASS_BORDER_ALPHA).CGColor()
+        )
+        rim_layer.setLineWidth_(1.0)
+        cv_layer.addSublayer_(rim_layer)
+
+        # Save handles in case future code needs to retint or animate them.
+        self._glass_view = glass_view
+        self._bg_tint_layer = bg_tint_layer
+        self._reflection_layer = reflection_layer
+        self._top_highlight_layer = top_highlight
+        self._rim_layer = rim_layer
 
         panel.setContentView_(content_view)
         self._panel = panel
