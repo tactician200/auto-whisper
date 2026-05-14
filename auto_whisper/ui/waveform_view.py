@@ -78,9 +78,13 @@ class WaveformBarsView(NSView):
             bar_h = min(level * SCALE_RMS_TO_BAR, 1.0) * (view_h - 4)
             bar_h = max(bar_h, 1.5)  # whisper-thin baseline at edges
 
-            # Gradient opacity falloff — center bars pop, edges almost vanish.
+            # Gradient opacity falloff — center bars pop, edges legible but
+            # quieter. Floor raised from 0.05 → 0.18 and exponent softened
+            # 2.2 → 1.7 so the waveform has enough body to stay readable
+            # over colourful wallpapers (user feedback 2026-05-14). The
+            # centre peak is still ~0.98 so audio-reactive movement reads.
             dist_from_center = 1.0 - abs(i - half_count + 0.5) / half_count
-            alpha = 0.05 + 0.93 * (dist_from_center ** 2.2)
+            alpha = 0.18 + 0.80 * (dist_from_center ** 1.7)
             self._color.colorWithAlphaComponent_(alpha).set()
 
             # Classic centered bars — grow up and down equally from the

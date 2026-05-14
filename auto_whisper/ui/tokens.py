@@ -15,9 +15,15 @@ BG_MATERIAL     = NSVisualEffectMaterialPopover  # kept for backward compat; new
 #   ~/Claude/projects/auto-whisper/.design/UI samples/codepen-liquid-glass/css.md
 # Treat these as the single source of truth for the HUD's glass treatment.
 GLASS_MATERIAL              = NSVisualEffectMaterialHUDWindow  # denser frost than Popover
-GLASS_ALPHA                 = 0.60   # backdrop strength (was 0.18 — way too diluted)
-GLASS_BG_TINT_ALPHA         = 0.12   # rgba(255,255,255,.12) — --glass-white
-GLASS_BORDER_ALPHA          = 0.25   # rgba(255,255,255,.25) — --glass-border (1px hairline)
+# 2026-05-14 iteration C — halfway between the codepen .glass base (A: 0.60 /
+# 0.12 / 0.25) and the .glass--liquid variant (B: 0.40 / 0.06 / 0.18). User
+# feedback: B too transparent over colourful wallpapers (waveform contrast
+# suffered) but A's border looked dark. Final: backdrop halfway, tint halfway,
+# border kept bright. Tweak any of these in isolation; the chip/waveform code
+# all reads from here.
+GLASS_ALPHA                 = 0.50   # halfway between .glass (0.60) and --liquid (0.40)
+GLASS_BG_TINT_ALPHA         = 0.09   # halfway between .glass (0.12) and --liquid (0.06)
+GLASS_BORDER_ALPHA          = 0.40   # user-preferred bright border (was 0.25 in .glass)
 GLASS_TOP_HIGHLIGHT_ALPHA   = 0.30   # inset 0 1px 0 rgba(255,255,255,.3)
 GLASS_REFLECTION_ALPHA      = 0.40   # 135deg gradient start — rgba(255,255,255,.4)
 GLASS_DROP_SHADOW_ALPHA     = 0.28   # 0 8px 32px rgba(0,0,0,.28)
