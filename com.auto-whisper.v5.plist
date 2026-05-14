@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  auto-whisper v5 LaunchAgent — beta install.
+
+  Differs from the v4.2 plist in three ways:
+    - Distinct Label (com.auto-whisper.v5) so both can coexist on disk and
+      the user can `launchctl load`/`unload` them independently while we
+      validate v5 in production.
+    - Points at the v5 venv + repo path; PYTHONPATH and main.py both
+      adjusted accordingly.
+    - All three USE_SERVICE_* flags + AUTO_WHISPER_AUTOSTART_SERVICE are
+      pre-set so the daemon spawns the service automatically (no second
+      LaunchAgent needed for beta).
+
+  Path notes: the absolute paths assume the v5 repo lives at
+  /Users/stj/src/auto-whisper-v5. install-v5.sh validates that before
+  copying this file to ~/Library/LaunchAgents/.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.auto-whisper.v5</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/stj/src/auto-whisper-v5/.venv/bin/python</string>
+        <string>/Users/stj/src/auto-whisper-v5/auto_whisper/main.py</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/stj/Library/Logs/auto-whisper-v5/auto-whisper-v5.out</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/stj/Library/Logs/auto-whisper-v5/auto-whisper-v5.err</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONPATH</key>
+        <string>/Users/stj/src/auto-whisper-v5</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>LANG</key>
+        <string>en_US.UTF-8</string>
+        <key>AUTO_WHISPER_USE_SERVICE</key>
+        <string>1</string>
+        <key>AUTO_WHISPER_USE_SERVICE_PROCESSING</key>
+        <string>1</string>
+        <key>AUTO_WHISPER_USE_SERVICE_TTS</key>
+        <string>1</string>
+        <key>AUTO_WHISPER_AUTOSTART_SERVICE</key>
+        <string>1</string>
+        <key>AUTO_WHISPER_PREFER_BUILTIN_MIC</key>
+        <string>1</string>
+    </dict>
+</dict>
+</plist>

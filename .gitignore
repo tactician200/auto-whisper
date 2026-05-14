@@ -1,0 +1,69 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+dist/
+build/
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Type checkers / linters
+.mypy_cache/
+.ruff_cache/
+.pyright/
+
+# Secrets
+.env
+.env.local
+.env.*.local
+
+# Local service runtime state (machine-specific tokens, caches)
+# Note: user data lives in ~/Library/Application Support/auto-whisper/
+# This guards against accidentally committing test fixtures with real tokens.
+service-token
+*-secret
+*.pem
+*.key
+
+# Logs
+*.log
+*.out
+*.err
+
+# macOS
+.DS_Store
+*.icns
+icon_*.png
+icon.iconset/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# py2app artifacts (build outputs only — setup_app.py is committed)
+
+# Misc
+com.dictationdaemon.plist
+setup.sh
+
+# MeetingsIntel — kept locally, separated from public auto-whisper repo.
+# Lives on disk and runs from this directory via its own LaunchAgent until
+# moved to its own repo in a future session.
+meetings_intel/
+prompts/
+quick_actions/Send to MeetingsIntel.workflow/
+Send to MeetingsIntel.applescript
+com.meetings-intel.plist
+ingest_meeting_recording.sh
+send_to_meetings_intel.sh
+render_meetingsintel_icon.swift
+assets/meetingsintel-icon.svg

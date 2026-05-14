@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.auto-whisper</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/stj/src/auto-whisper-v5/.venv/bin/python</string>
+        <string>/Users/stj/src/auto-whisper-v5/auto_whisper/main.py</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/stj/Library/Logs/auto-whisper/auto-whisper.out</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/stj/Library/Logs/auto-whisper/auto-whisper.err</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONPATH</key>
+        <string>/Users/stj/src/auto-whisper-v5</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>LANG</key>
+        <string>en_US.UTF-8</string>
+    </dict>
+</dict>
+</plist>
