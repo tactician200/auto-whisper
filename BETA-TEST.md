@@ -1,136 +1,154 @@
-# auto-whisper v5 — beta test checklist
+# auto-whisper v5 — Beta test checklist
 
-> **Status (2026-04-30):** v5.0 GA. Phase 0 (direct Groq path) is the production
-> line — that's what `com.auto-whisper` LaunchAgent has been running since
-> 2026-04-28 with zero crashes/errors. The FastAPI service split documented
-> below ("via auto-whisper-service" banner lines, Round 1 service checks)
-> is **deferred to v5.1** — `fastapi`/`uvicorn` are intentionally not
-> installed in the active venv, and the `AUTO_WHISPER_USE_SERVICE_*` flags
-> are not set on the active plist. Treat this file as a) historical
-> validation log of the beta, and b) reference for v5.1 when we wire the
-> service back in. For new installs of v5.0, follow the installer doc
-> instead (Phase 3 deliverable).
+```
+┌──────────────────────────────────────────────────────────────┐
+│  v5.0 GA  ·  BETA VALIDATION  ·  ROLLBACK SAFE  ·  MIT       │
+└──────────────────────────────────────────────────────────────┘
+```
 
-You're switching your daily-use LaunchAgent from v4.2 to v5. Everything is
-reversible with one command (`make revert-to-v4`). Plan: 30-60 min over a
-normal workday.
+Cambias tu LaunchAgent diario de v4.2 a v5. Todo es reversible con un comando (`make revert-to-v4`). Plan: 30-60 min sobre un día normal de trabajo.
 
-## Pre-flight (5 min)
+> **Nota honesta sobre el scope (2026-04-30)**: v5.0 GA shipped. La **Phase 0** (direct Groq path) es la línea de producción — el LaunchAgent `com.auto-whisper` corre con eso desde 2026-04-28 sin crashes. El **service split FastAPI** documentado abajo ("via auto-whisper-service" banner lines, Round 1 service checks) está **diferido a v5.1** — `fastapi`/`uvicorn` no están en el venv activo, y los flags `AUTO_WHISPER_USE_SERVICE_*` no están seteados en el plist activo. Trata este archivo como (a) log histórico de validación beta, y (b) referencia para v5.1 cuando volvamos a wirear el service. Para installs nuevos de v5.0, seguí el installer doc en lugar de éste.
+
+---
+
+## Pre-flight · 5 min
 
 ```bash
 cd /Users/stj/src/auto-whisper-v5
 
-# Sanity: tests pass.
+# Sanity: tests pasan
 make test
 
-# Sanity: v5 venv works.
+# Sanity: v5 venv funciona
 .venv/bin/python -c "import auto_whisper, auto_whisper_service; print('OK')"
 
-# Confirm v4.2 is currently your active LaunchAgent (baseline).
+# Confirma que v4.2 es tu LaunchAgent activo hoy (baseline)
 make v4-status
-# Expected: a line like "12345  -  com.auto-whisper"
+# Esperado: línea tipo "12345  -  com.auto-whisper"
 ```
 
-## Round 1 — manual run, no LaunchAgent change (10 min)
+---
 
-Validates the v5 binary works end-to-end before committing to a launchd swap.
+## Round 01 · manual run, sin tocar LaunchAgent · 10 min
+
+Valida que el binario v5 funciona end-to-end antes de comprometerse a un launchd swap.
 
 ```bash
-make unload-v4         # stop v4.2 (file preserved, reload anytime with load-v4)
+make unload-v4         # detiene v4.2 (archivo preservado, recargás con load-v4)
 make run-v5-beta       # launches menubar; daemon auto-spawns service
 ```
 
-**Checks while v5 is running:**
+### Checks mientras v5 corre
 
-- [ ] Banner shows all 6 lines:
-  - Cloud engine: `via auto-whisper-service`
-  - LLM processing: `via auto-whisper-service`
-  - TTS: `via auto-whisper-service`
-  - Mic input: `prefer built-in over Bluetooth`
-  - Service: `reachable`
-- [ ] Right-cmd-cmd → speak → text gets pasted
-- [ ] Menu bar item "Recent dictations" populates after 1-2 dictates
-- [ ] Menu bar action "Optimize what I say → prompt" produces a 4-section prompt
-- [ ] Menu bar action "Explain selection (speak)" actually speaks (TTS)
-- [ ] Stop button while speaking → audio stops immediately
-
-**AirPods regression test (the bug we're hunting):**
-
-- [ ] Connect AirPods.
-- [ ] Right-cmd-cmd → speak normally → check transcription quality.
-- [ ] Logs (Ctrl+C menubar, scroll up) show:
-  `Default input is Bluetooth (AirPods Pro); overriding to built-in (MacBook Air Microphone) for transcription quality.`
-- [ ] Compare quality with `AUTO_WHISPER_PREFER_BUILTIN_MIC=0 make run-v5-beta` (the bug path) — should be noticeably worse.
-
-When done with Round 1: `Ctrl+C` the menubar.
-
-```bash
-make load-v4    # restore v4.2 as active daemon while you decide
+```
+[ ] Banner muestra las 6 líneas:
+    · Cloud engine:    via auto-whisper-service
+    · LLM processing:  via auto-whisper-service
+    · TTS:             via auto-whisper-service
+    · Mic input:       prefer built-in over Bluetooth
+    · Service:         reachable
+[ ] Right-cmd-cmd → hablar → texto pegado en el cursor
+[ ] Menu bar "Recent dictations" populates tras 1-2 dictados
+[ ] Menu bar "Optimize what I say → prompt" produce prompt 4-secciones
+[ ] Menu bar "Explain selection (speak)" efectivamente habla (TTS)
+[ ] Stop button mientras habla → audio se detiene inmediato
 ```
 
-## Round 2 — install as your active LaunchAgent (5 min + days of real use)
+### Test de regresión AirPods (el bug que cazamos)
 
-If Round 1 looked good, swap launchd over.
+```
+[ ] Conectar AirPods
+[ ] Right-cmd-cmd → hablar normal → revisar calidad de transcripción
+[ ] Los logs (Ctrl+C menubar, scroll up) muestran:
+    "Default input is Bluetooth (AirPods Pro); overriding to built-in
+     (MacBook Air Microphone) for transcription quality."
+[ ] Comparar calidad con AUTO_WHISPER_PREFER_BUILTIN_MIC=0 make run-v5-beta
+    (el bug path) — debería verse notoriamente peor.
+```
+
+Cuando termines Round 01: `Ctrl+C` el menubar.
+
+```bash
+make load-v4    # restaura v4.2 como daemon activo mientras decides
+```
+
+---
+
+## Round 02 · instalar como LaunchAgent activo · 5 min + días de uso real
+
+Si Round 01 se vio bien, swap launchd.
 
 ```bash
 make install-v5
-# Output ends with the rollback command — keep that terminal open or copy it.
+# El output termina con el rollback command — mantené esa terminal abierta o copialo.
 ```
 
-**Verify launchd has v5:**
+### Verificar que launchd tiene v5
 
 ```bash
 make v5-status
-# Expected: "12345  0  com.auto-whisper.v5"
+# Esperado: "12345  0  com.auto-whisper.v5"
 
 make v4-status
-# Expected: "v4.2 not running" (file at ~/Library/LaunchAgents/com.auto-whisper.plist preserved)
+# Esperado: "v4.2 not running" (archivo en ~/Library/LaunchAgents/com.auto-whisper.plist preservado)
 ```
 
-Now use v5 for normal work for as long as you're comfortable. The active
-LaunchAgent persists across logins.
+Ahora usá v5 para trabajo normal todo el tiempo que estés cómodo. El LaunchAgent activo persiste entre logins.
 
-## Rollback (anytime)
+---
+
+## Rollback · anytime
 
 ```bash
 cd /Users/stj/src/auto-whisper-v5
 make revert-to-v4
 ```
 
-This unloads v5 and re-loads v4.2. Both plist files stay on disk so you can
-flip back to v5 with `make install-v5` later.
+Esto unloads v5 y re-carga v4.2. Ambos plist se quedan en disco — flipeás a v5 con `make install-v5` cuando quieras.
+
+---
 
 ## Logs
 
-Tailing helps diagnose anything weird:
+Tailing ayuda a diagnosticar cualquier rareza:
 
 ```bash
 tail -f ~/Library/Logs/auto-whisper-v5/auto-whisper-v5.err     # menubar + service stderr
-ls ~/Library/Logs/auto-whisper-v5/                              # both .out and .err
+ls ~/Library/Logs/auto-whisper-v5/                              # ambos .out y .err
 ```
 
-## v5.0 GA scope (and what's deferred to v5.1)
+---
 
-**Shipped in v5.0:**
-- Direct Groq path with AirPods built-in-mic override.
-- `optimize_prompt()` 4-section restructure, max_tokens=1500.
-- Existing modes: dictate, organize, optimize, summarize, explain, read.
+## Scope v5.0 GA · qué shipped vs qué está diferido
 
-**Deferred to v5.1:**
-- FastAPI service split (the "via auto-whisper-service" path documented in
-  this file). Code is in tree and tested in isolation, but never run in
-  production. Watchdog with auto-respawn on dead/unhealthy subprocess is
-  pre-built in `auto_whisper/service_lifecycle.py` for when this turns on.
-- Privacy Mode end-to-end (today only TTS forces offline; transcription/LLM
-  gating lands when service split ships).
-- Onboarding wizard — TTS voice/rate hardcoded.
-- DMG / signed installer. Phase 3 ships a shell installer for tech-friendly
-  demo users; signed bundle is a v5.2+ concern once the prompt-converter
-  hypothesis is validated.
+### Shipped en v5.0
 
-## What to report back
+- Direct Groq path con AirPods built-in-mic override.
+- `optimize_prompt()` 4-section restructure, `max_tokens=1500`.
+- Modos existentes: dictate, organize, optimize, summarize, explain, read.
 
-If something breaks, capture:
-1. The banner output from a fresh launch (`make run-v5-beta` foreground).
-2. The last ~50 lines of `~/Library/Logs/auto-whisper-v5/auto-whisper-v5.err`.
-3. What you did right before the failure.
+### Diferido a v5.1
+
+- **FastAPI service split** (el path "via auto-whisper-service" documentado en este archivo). El código está en tree y testeado aislado, pero nunca corrido en producción. Watchdog con auto-respawn en subprocess muerto/unhealthy está pre-built en `auto_whisper/service_lifecycle.py` para cuando esto se prenda.
+- **Privacy Mode end-to-end** (hoy solo TTS fuerza offline; gating de transcripción/LLM llega cuando ship el service split).
+- **Onboarding wizard** — TTS voice/rate hardcoded.
+- **DMG / signed installer**. Phase 3 ships shell installer para demo users tech-friendly; signed bundle es concern de v5.2+ una vez validada la hypothesis del prompt-converter.
+
+---
+
+## Qué reportar de vuelta si algo rompe
+
+```
+[ 01 ]  Banner output de un launch fresh (make run-v5-beta foreground)
+[ 02 ]  Últimas ~50 líneas de ~/Library/Logs/auto-whisper-v5/auto-whisper-v5.err
+[ 03 ]  Qué hacías justo antes del failure
+```
+
+---
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  auto-whisper · v5 · MIT · Hecho en El Crisol                │
+└──────────────────────────────────────────────────────────────┘
+```
