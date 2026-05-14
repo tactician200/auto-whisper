@@ -96,7 +96,8 @@ def test_each_mode_dispatches_through_direct(monkeypatch, fn_name, mode_name):
 
     direct_called = {"yes": False}
 
-    def fake(text):
+    def fake(text, **kwargs):
+        # **kwargs absorbs optional params like `emphasis` on optimize_prompt.
         direct_called["yes"] = True
         return f"direct-{mode_name}"
 

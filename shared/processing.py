@@ -156,68 +156,105 @@ _VALID_INTENTS = (
 )
 
 
+# Heuristic signal tables — kept module-level so tests can introspect them
+# and so the order of checks is explicit. Order matters: the first table
+# that matches wins, so put the highest-precision intent first.
+_CODING_SIGNALS: tuple[str, ...] = (
+    "implementa", "implement ", "fix ", "refactor", "write a script",
+    "crea un script", "build a ", "function ", ".py", ".ts", ".tsx",
+    ".js", "import ", "def ", "class ", "claude code", "cursor",
+)
+_WRITING_SIGNALS: tuple[str, ...] = (
+    "escribe un email", "escribe un mensaje", "redacta", "necesito un texto",
+    "post de ", "post sobre", "artículo sobre", "articulo sobre",
+    "write an email", "write a post", "draft a ", "write a message",
+    "para publicar", "tweet sobre", "comunicado",
+)
+# Decision before research because "pros y contras de X vs Y" implies the
+# user is weighing options, not gathering external info.
+_DECISION_SIGNALS: tuple[str, ...] = (
+    "debo decidir", "qué elijo", "que elijo", "qué escojo", "que escojo",
+    "decisión entre", "decision entre", "should i ", "vale la pena",
+    "me conviene", "me sirve más", "me sirve mas",
+    "elegir entre", "decidir entre",
+    "pros y contras", "ventajas y desventajas",
+)
+_RESEARCH_SIGNALS: tuple[str, ...] = (
+    "investiga ", "investigar ", "busca info", "busca información",
+    "compara ", "comparar ", "estado del arte", "qué se sabe de",
+    "que se sabe de", "research ", "compare ",
+    "alternativas a ", "alternativas para ",
+)
+
+
+def _first_match(text: str, signals: tuple[str, ...]) -> str | None:
+    """Return the first signal in `signals` that appears in `text`, or None."""
+    for sig in signals:
+        if sig in text:
+            return sig
+    return None
+
+
 def classify_intent(text: str) -> str:
     """Cheap LLM classifier for the smart-hotkey path.
 
-    Returns one of "raw", "organize", "prompt_coding", "prompt_writing".
-    Falls back to "raw" on any parse failure — never blocks the paste flow.
-    Cheap heuristics short-circuit the LLM call when the answer is obvious.
+    Returns one of "raw", "organize", "prompt_coding", "prompt_writing",
+    "research", "decision_making". Falls back to "raw" on any parse failure
+    — never blocks the paste flow. Cheap heuristics short-circuit the LLM
+    call when the answer is obvious.
+
+    Logs every decision path (heuristic match or LLM call + latency) at
+    INFO level under [classifier] so the daemon log is enough to debug
+    misclassifications without rerunning anything.
     """
+    import time
+
     stripped = (text or "").strip()
     word_count = len(stripped.split())
     if word_count < 6:
+        logger.info("[classifier] raw (heuristic: <6 words, n=%d)", word_count)
         return "raw"
     lowered = stripped.lower()
-    # Coding-prompt signals (high precision).
-    coding_signals = (
-        "implementa", "implement ", "fix ", "refactor", "write a script",
-        "crea un script", "build a ", "function ", ".py", ".ts", ".tsx",
-        ".js", "import ", "def ", "class ", "claude code", "cursor",
-    )
-    if any(sig in lowered for sig in coding_signals):
-        return "prompt_coding"
-    # Writing-prompt signals.
-    writing_signals = (
-        "escribe un email", "escribe un mensaje", "redacta", "necesito un texto",
-        "post de ", "post sobre", "artículo sobre", "articulo sobre",
-        "write an email", "write a post", "draft a ", "write a message",
-        "para publicar", "tweet sobre", "comunicado",
-    )
-    if any(sig in lowered for sig in writing_signals):
-        return "prompt_writing"
-    # Decision-making signals (checked before research because "pros y contras
-    # de X vs Y" implies the user is weighing, not gathering external info).
-    decision_signals = (
-        "debo decidir", "qué elijo", "que elijo", "qué escojo", "que escojo",
-        "decisión entre", "decision entre", "should i ", "vale la pena",
-        "me conviene", "me sirve más", "me sirve mas",
-        "elegir entre", "decidir entre",
-        "pros y contras", "ventajas y desventajas",
-    )
-    if any(sig in lowered for sig in decision_signals):
-        return "decision_making"
-    # Research signals.
-    research_signals = (
-        "investiga ", "investigar ", "busca info", "busca información",
-        "compara ", "comparar ", "estado del arte", "qué se sabe de",
-        "que se sabe de", "research ", "compare ",
-        "alternativas a ", "alternativas para ",
-    )
-    if any(sig in lowered for sig in research_signals):
-        return "research"
+
+    for intent, signals in (
+        ("prompt_coding", _CODING_SIGNALS),
+        ("prompt_writing", _WRITING_SIGNALS),
+        ("decision_making", _DECISION_SIGNALS),
+        ("research", _RESEARCH_SIGNALS),
+    ):
+        matched = _first_match(lowered, signals)
+        if matched is not None:
+            logger.info("[classifier] %s (heuristic: %r)", intent, matched)
+            return intent
+
     # LLM call for the ambiguous middle.
+    t0 = time.time()
     result = _call_groq(
         _CLASSIFIER_PROMPT.format(text=stripped[:MAX_INPUT_CHARS]),
         max_tokens=8,
     )
+    elapsed = time.time() - t0
     if not result:
+        logger.info("[classifier] raw (LLM returned None after %.2fs)", elapsed)
         return "raw"
     cleaned = result.strip().lower().rstrip(".,!?\n")
     if cleaned in _VALID_INTENTS:
+        logger.info(
+            "[classifier] %s (LLM %.2fs, input_len=%d, output=%r)",
+            cleaned, elapsed, len(stripped), result,
+        )
         return cleaned
     # Legacy "prompt" output (older classifier responses) → assume coding.
     if cleaned == "prompt":
+        logger.info(
+            "[classifier] prompt_coding (LLM %.2fs, legacy 'prompt' output)",
+            elapsed,
+        )
         return "prompt_coding"
+    logger.info(
+        "[classifier] raw (LLM %.2fs, unrecognized output=%r)",
+        elapsed, result,
+    )
     return "raw"
 
 

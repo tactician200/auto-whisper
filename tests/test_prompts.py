@@ -32,11 +32,14 @@ def test_all_prompts_are_non_empty(prompt):
 
 @pytest.mark.parametrize("prompt", ALL_PROMPTS)
 def test_all_prompts_format_renders_cleanly(prompt):
-    rendered = prompt.format(text="USER_INPUT_HERE")
+    # PROMPT_OPTIMIZE accepts both {text} and {emphasis}; the rest only use
+    # {text}. Pass emphasis="" so the universal-shape test covers both.
+    rendered = prompt.format(text="USER_INPUT_HERE", emphasis="")
     assert "USER_INPUT_HERE" in rendered
     assert "{text}" not in rendered  # no unreplaced placeholders
+    assert "{emphasis}" not in rendered
     assert "{" not in rendered or "}" not in rendered or not any(
-        c in rendered for c in ("{text}", "{ text }")
+        c in rendered for c in ("{text}", "{ text }", "{emphasis}")
     ), "stray format placeholder in rendered prompt"
 
 
