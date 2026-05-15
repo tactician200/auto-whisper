@@ -143,6 +143,36 @@ def _watchdog_loop() -> None:
             )
 
 
+def _service_interpreter_and_env() -> tuple[str, dict]:
+    """Pick the right Python + env vars for spawning the service.
+
+    - In a source checkout, `sys.executable` is the venv's `python` which
+      has uvicorn / fastapi / etc. on its default sys.path. Return it as-is.
+    - In a py2app bundle, `sys.executable` is the bundle launcher binary
+      (e.g. AutoWhisper), NOT a Python interpreter. The embedded Python
+      lives at `Contents/MacOS/python`, but it's a bare launcher that does
+      not auto-add the bundle's `lib/python3.11/` to sys.path. We have to
+      do that ourselves via PYTHONPATH, otherwise `import uvicorn` fails.
+    """
+    if getattr(sys, "frozen", False):
+        # Inside a py2app bundle.
+        from pathlib import Path
+        bundle_macos = Path(sys.executable).parent           # Contents/MacOS
+        bundle_python = bundle_macos / "python"
+        bundle_libs = bundle_macos.parent / "Resources" / "lib" / "python3.11"
+        if bundle_python.exists() and bundle_libs.exists():
+            env = os.environ.copy()
+            # Prepend so the bundle's site-packages wins over anything the
+            # user might have on their system PYTHONPATH.
+            existing = env.get("PYTHONPATH", "")
+            env["PYTHONPATH"] = (
+                f"{bundle_libs}:{existing}" if existing else str(bundle_libs)
+            )
+            return str(bundle_python), env
+    # Source path — venv has everything we need on its default sys.path.
+    return sys.executable, os.environ.copy()
+
+
 def _spawn_service() -> subprocess.Popen:
     """Spawn `python -m auto_whisper_service.main` as a detached subprocess.
 
@@ -152,12 +182,15 @@ def _spawn_service() -> subprocess.Popen:
     go to DEVNULL because the service has its own logger; mixing into the
     daemon's stdout causes interleaved log noise.
     """
-    cmd = [sys.executable, "-m", "auto_whisper_service.main"]
+    interpreter, env = _service_interpreter_and_env()
+    cmd = [interpreter, "-m", "auto_whisper_service.main"]
+    logger.info("Spawning service: %s", " ".join(cmd))
     return subprocess.Popen(
         cmd,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
+        env=env,
     )
 
 
