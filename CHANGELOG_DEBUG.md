@@ -20,7 +20,7 @@ Historial de diagnósticos y fixes. Más reciente primero.
 
 **Límite conocido:** cuando Groq genuinamente cuelga, igual se paga el fallback local (~11s con modelo `medium`, beam 8). El fix acelera la *caída* al fallback, no la API de Groq. No toqué el proceso service (evita el reload-trap del child con `kickstart -k`).
 
-**Validación:** pendiente — probar con `make run-v5-beta` desde código (el bundle `/Applications/AutoWhisper.app` necesita rebuild para tomar los cambios).
+**Validación:** ✅ confirmada en uso (2026-05-29) — rebuild del bundle + reinstall + re-grant TCC (el re-sign ad-hoc revocó Accessibility/Microphone, resuelto con `tccutil reset … com.auto-whisper.app` + re-grant manual). Usuario reporta latencia baja y el estado `PROCESANDO` visible al terminar de hablar.
 
 **Lección:** timeouts de red en flujos interactivos deben escalar con el tamaño del payload, no ser fijos. Un techo de 30s en una llamada que normalmente toma 1s convierte cualquier degradación de la API en 30s de espera visible.
 
