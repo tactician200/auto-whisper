@@ -1095,6 +1095,15 @@ class AutoWhisperApp(rumps.App):
 
     def _handle_device_change(self):
         """Called on main thread when CoreAudio reports device add/remove."""
+        # Mark HUD panel stale — empirically, an audio device change followed
+        # by a delayed show (10+s later) sometimes leaves the panel in a
+        # state where orderFrontRegardless silently no-ops. Rebuild on next show.
+        if self._hud is not None:
+            try:
+                self._hud.mark_stale("audio device change")
+            except Exception:
+                pass
+
         old_index = self._input_device_index
         old_label = self._input_device_label
         self._refresh_input_devices()
@@ -1754,6 +1763,19 @@ class AutoWhisperApp(rumps.App):
         self._set_ui(self.ICON_STARTING, start_label)
         from PyObjCTools import AppHelper
         AppHelper.callAfter(lambda: setattr(self._btn_dictate, 'title', '■ Stop dictation'))
+        # Show HUD optimistically — Bluetooth mic handshake (AirPods HFP/SCO)
+        # can stall the stream open for 1–3s or time out. Without this, the
+        # HUD only appears after stream.start() succeeds and looks broken on
+        # slow/failed opens. mark_recording_started() flips REC on later.
+        if self._hud is not None:
+            try:
+                from shared.user_profile import is_privacy_mode
+                self._hud.show(
+                    mode=self._recording_mode,
+                    privacy=is_privacy_mode(),
+                )
+            except Exception as exc:
+                print(f"[ui] HUD show failed: {exc}", flush=True)
         target_name = self._target_app.localizedName() if self._target_app else "unknown"
         start_sound = SOUND_START_ORGANIZE if recording_mode == RECORDING_MODE_ORGANIZE else SOUND_START_DICTATE
         # Play the cue immediately so the user gets confirmation even if the
@@ -1810,6 +1832,11 @@ class AutoWhisperApp(rumps.App):
                     self._set_ui(self.ICON_IDLE, self._format_status_line())
                     from PyObjCTools import AppHelper
                     AppHelper.callAfter(lambda: setattr(self._btn_dictate, 'title', 'Dictate'))
+                    if self._hud is not None:
+                        try:
+                            self._hud.hide()
+                        except Exception:
+                            pass
                     return
 
                 # Try to open at target SR; if device rejects it, fall back to native SR
@@ -1840,6 +1867,11 @@ class AutoWhisperApp(rumps.App):
                     self._set_ui(self.ICON_IDLE, self._format_status_line())
                     from PyObjCTools import AppHelper
                     AppHelper.callAfter(lambda: setattr(self._btn_dictate, 'title', 'Dictate'))
+                    if self._hud is not None:
+                        try:
+                            self._hud.hide()
+                        except Exception:
+                            pass
                     return
 
                 self._capture_sample_rate = capture_sr
@@ -1852,19 +1884,20 @@ class AutoWhisperApp(rumps.App):
                 logger.info(f"Recording started ({recording_mode}) at {capture_sr} Hz")
                 if self._hud is not None:
                     try:
-                        from shared.user_profile import is_privacy_mode
-                        self._hud.show(
-                            mode=self._recording_mode,
-                            privacy=is_privacy_mode(),
-                        )
+                        self._hud.mark_recording_started()
                     except Exception as exc:
-                        print(f"[ui] HUD show failed: {exc}", flush=True)
+                        print(f"[ui] HUD mark_recording_started failed: {exc}", flush=True)
             except Exception as e:
                 logger.error(f"Failed to start recording: {e}")
                 self.recording = False
                 self._set_ui(self.ICON_IDLE, "Mic error")
                 from PyObjCTools import AppHelper
                 AppHelper.callAfter(lambda: setattr(self._btn_dictate, 'title', 'Dictate'))
+                if self._hud is not None:
+                    try:
+                        self._hud.hide()
+                    except Exception:
+                        pass
 
         t = threading.Thread(target=record, daemon=True)
         self._record_thread = t
@@ -1926,6 +1959,15 @@ class AutoWhisperApp(rumps.App):
         recording_mode = self._recording_mode
         from PyObjCTools import AppHelper
         AppHelper.callAfter(lambda: setattr(self._btn_dictate, 'title', 'Dictate'))
+
+        # HUD → processing state: freeze the timer, swap chip to "PROCESANDO",
+        # run the indeterminate waveform sweep. Skipped on the empty-audio
+        # early-exit below (HUD just hides).
+        if self._hud is not None:
+            try:
+                self._hud.mark_processing()
+            except Exception as exc:
+                print(f"[ui] HUD mark_processing failed: {exc}", flush=True)
 
         # Detach stream reference immediately — audio callback will see recording=False
         stream = self.stream
