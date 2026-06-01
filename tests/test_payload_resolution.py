@@ -46,6 +46,21 @@ def test_strip_translate_leaves_late_language_mention_intact():
     assert "no me gusta el" in out
 
 
+def test_strip_prompt_coding_drops_arma_un_prompt_para():
+    a = va.get("prompt_coding")
+    # The reported bug: "arma un prompt para hacer X" optimized the whole phrase.
+    assert d._strip_leading_instruction(
+        "arma un prompt para hacer una imagen tipo scandinava de santiago", a
+    ) == "hacer una imagen tipo scandinava de santiago"
+
+
+def test_strip_prompt_coding_crea_un_prompt_para():
+    a = va.get("prompt_coding")
+    assert d._strip_leading_instruction(
+        "crea un prompt para implementar un parser de csv en python", a
+    ) == "implementar un parser de csv en python"
+
+
 def test_strip_tone_drops_tone_word_and_keeps_content():
     a = va.get("tone")
     assert d._strip_leading_instruction(

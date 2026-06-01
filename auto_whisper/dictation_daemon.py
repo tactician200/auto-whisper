@@ -373,6 +373,10 @@ def _strip_leading_instruction(text: str, action) -> str:
     elif aid == "tone":
         from shared.intent_router import _TONES
         s = _drop_until_keyword(s, _TONES)
+    elif aid == "prompt_coding":
+        # "arma un prompt para hacer X" → verb leaves "para hacer X"; drop the
+        # trailing connector so the optimizer sees only "hacer X".
+        s = re.sub(r"^(?:para|de|sobre|acerca de|que)\s+", "", s, count=1, flags=re.IGNORECASE)
     # Fallback cleanup when no keyword matched (e.g. a verb with no language word).
     s = _LEADING_CONNECTOR.sub("", s, count=1)
     s = _LEADING_FILLER.sub("", s, count=1)
@@ -2255,6 +2259,20 @@ class AutoWhisperApp(rumps.App):
                                     action_id, raw_text, clip
                                 )
 
+                            # prompt_coding reached by an explicit verb ("arma un
+                            # prompt para …") carries the instruction in raw_text.
+                            # Strip it so the optimizer sees only the content. When
+                            # prompt_coding is the no-command default (classify_intent),
+                            # raw_text is already pure content — leave it untouched.
+                            prompt_text = raw_text
+                            if (action_id == "prompt_coding" and route_decision
+                                    and route_decision.source == "verb_fastpath"):
+                                import shared.voice_actions as _va
+                                prompt_text = (
+                                    _strip_leading_instruction(raw_text, _va.get("prompt_coding"))
+                                    or raw_text
+                                )
+
                             # F5 — make the fallback-to-dictation visible: the
                             # router chose NOT to act, that's not a failure.
                             if recording_mode == RECORDING_MODE_ROUTE and action_id == "raw":
@@ -2287,7 +2305,7 @@ class AutoWhisperApp(rumps.App):
                                 self._set_ui(self.ICON_PROCESSING, "Optimizing coding prompt...")
                                 try:
                                     from auto_whisper.text_processor import optimize_prompt
-                                    optimized = optimize_prompt(raw_text, emphasis=category)
+                                    optimized = optimize_prompt(prompt_text, emphasis=category)
                                 except Exception as e:
                                     logger.error(f"Prompt optimization failed: {e}")
                                     optimized = None
