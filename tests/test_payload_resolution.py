@@ -20,6 +20,39 @@ def test_strip_leading_instruction_tone():
     assert d._strip_leading_instruction("hazlo más formal oye dame eso", a) == "oye dame eso"
 
 
+# --- regression: filler between verb and language/tone word (the "pega con la
+# instrucción" bug). The connector/filler regexes alone left "al inglés" stuck. ---
+
+def test_strip_translate_filler_between_verb_and_language():
+    a = va.get("translate")
+    # "esto" sits between the verb and "al inglés" — must not survive.
+    assert d._strip_leading_instruction(
+        "tradúcelo esto al inglés tengo una reunión mañana", a
+    ) == "tengo una reunión mañana"
+
+
+def test_strip_translate_glued_pronoun_before_language():
+    a = va.get("translate")
+    # "tradúcemelo" → verb "tradúceme" + "lo"; the "lo al inglés" must go.
+    assert d._strip_leading_instruction(
+        "tradúcemelo al inglés que viene el cliente nuevo", a
+    ) == "que viene el cliente nuevo"
+
+
+def test_strip_translate_leaves_late_language_mention_intact():
+    a = va.get("translate")
+    # "inglés" appears late as real content → don't eat the preceding words.
+    out = d._strip_leading_instruction("traduce no me gusta el inglés británico", a)
+    assert "no me gusta el" in out
+
+
+def test_strip_tone_drops_tone_word_and_keeps_content():
+    a = va.get("tone")
+    assert d._strip_leading_instruction(
+        "ponlo más amable este mensaje al proveedor", a
+    ) == "este mensaje al proveedor"
+
+
 def test_reply_uses_clipboard_as_payload_and_dictation_as_instruction():
     payload, instruction = d._resolve_payload(
         "reply", "respóndele cordial y firme", clipboard="oye necesito eso YA"

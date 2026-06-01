@@ -323,33 +323,59 @@ _LEADING_FILLER = re.compile(
 )
 
 
-def _strip_leading_instruction(text: str, action) -> str:
-    """Best-effort: drop the canonical verb + a trailing connector/filler from
-    the phrase start, leaving the content the user wants transformed.
+def _drop_until_keyword(s: str, keywords, max_lead_words: int = 3) -> str:
+    """Drop everything up to and including the first `keyword` that appears
+    within the first `max_lead_words` words.
 
-    "traduce a inglés tengo una reunión" → "tengo una reunión"
-    "ponlo más formal oye dame eso"      → "oye dame eso"
+    This absorbs any filler between the verb and the language/tone word, in any
+    order — "tradúcelo esto al inglés X" and "tradúcemelo al inglés X" both
+    reduce to "X". The connector/filler regexes miss these because the extra
+    tokens ("esto", "lo", "porfa") aren't a known connector OR filler. The
+    word-position guard avoids eating real content that merely mentions the
+    keyword later ("no me gusta el inglés británico" stays intact).
+    """
+    low = s.lower()
+    best_end = None
+    for kw in keywords:
+        m = re.search(rf"\b{re.escape(kw)}\b", low)
+        if m and len(low[:m.start()].split()) <= max_lead_words:
+            if best_end is None or m.end() < best_end:
+                best_end = m.end()
+    if best_end is not None:
+        return s[best_end:].lstrip(" ,:;.-¿?¡!")
+    return s
+
+
+def _strip_leading_instruction(text: str, action) -> str:
+    """Best-effort: drop the canonical verb + the instruction prefix from the
+    phrase start, leaving the content the user wants transformed.
+
+    "traduce a inglés tengo una reunión"   → "tengo una reunión"
+    "tradúcelo esto al inglés tengo prisa"  → "tengo prisa"
+    "ponlo más formal oye dame eso"         → "oye dame eso"
     Heuristic, not a parser — when in doubt it leaves text intact.
     """
     if not text or action is None:
         return (text or "").strip()
-    s = text
+    s = text.strip()
     low = s.lower()
     for verb in sorted(action.canonical_verbs, key=len, reverse=True):
         if low.startswith(verb):
             s = s[len(verb):]
             break
-    s = s.lstrip(" ,:;.-")
+    s = s.lstrip(" ,:;.-¿?¡!")
+    # Primary, robust cut: the instruction ends at the language word (translate)
+    # or the tone word (tone). Dropping up to it absorbs intervening filler.
+    aid = getattr(action, "id", None)
+    if aid == "translate":
+        from shared.intent_router import _LANG_MAP
+        s = _drop_until_keyword(s, _LANG_MAP.keys())
+    elif aid == "tone":
+        from shared.intent_router import _TONES
+        s = _drop_until_keyword(s, _TONES)
+    # Fallback cleanup when no keyword matched (e.g. a verb with no language word).
     s = _LEADING_CONNECTOR.sub("", s, count=1)
     s = _LEADING_FILLER.sub("", s, count=1)
-    # For tone, the requested tone word ("formal", "amable", ...) is part of the
-    # instruction, not the content — drop it if it leads the remainder.
-    if getattr(action, "id", None) == "tone":
-        from shared.intent_router import _TONES
-        s = re.sub(
-            rf"^(?:{'|'.join(re.escape(t) for t in _TONES)})\b[\s,:;.\-]*",
-            "", s, count=1, flags=re.IGNORECASE,
-        )
     return s.strip()
 
 
