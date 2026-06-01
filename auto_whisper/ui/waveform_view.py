@@ -99,6 +99,26 @@ class WaveformBarsView(NSView):
             path.fill()
 
     @objc.python_method
+    def pulse_indeterminate(self, phase: float) -> None:
+        """Indeterminate 'thinking' sweep — used while processing (no live audio).
+
+        A low-amplitude gaussian bump travels left↔right across the bars so the
+        HUD reads as working rather than frozen. `phase` is seconds elapsed
+        since processing began; the bump position ping-pongs with it.
+        """
+        import math
+        # Ping-pong the bump centre across the bar range, ~1.4s per sweep.
+        pos = (math.sin(phase * 2.0 * math.pi / 1.4) * 0.5 + 0.5) * (BAR_COUNT - 1)
+        sigma = BAR_COUNT / 7.0
+        for i in range(BAR_COUNT):
+            d = i - pos
+            # Peak ≈ 0.012 → 0.012 * SCALE_RMS_TO_BAR(40) ≈ 0.48 of bar height.
+            self._raw[i] = 0.012 * math.exp(-(d * d) / (2.0 * sigma * sigma))
+        for i in range(BAR_COUNT):
+            self._display[i] = self._display[i] * 0.65 + self._raw[i] * 0.35
+        self.setNeedsDisplay_(True)
+
+    @objc.python_method
     def reset(self) -> None:
         self._raw = [0.0] * BAR_COUNT
         self._display = [0.0] * BAR_COUNT

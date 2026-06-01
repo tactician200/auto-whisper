@@ -59,6 +59,21 @@ def set_active_project(name: str | None) -> None:
 GROQ_TRANSCRIPTION_MODEL = "whisper-large-v3"
 
 
+def cloud_timeout_for(duration_s: float) -> float:
+    """Per-request cloud timeout, scaled to audio length.
+
+    Groq Whisper normally returns in ~1s regardless of clip length (it's
+    upload-bound, not compute-bound). A flat 30s ceiling meant that when the
+    API degrades/hangs the user stares at a frozen HUD for 30s before the
+    local fallback even starts. We scale instead: short clips (the common
+    dictation case) fail fast and fall back to local quickly; long uploads
+    still get headroom. Floor 10s protects legitimately-slow-but-working
+    calls (observed up to ~9s on degraded days); cap 30s preserves the old
+    ceiling for multi-minute audio.
+    """
+    return min(30.0, max(10.0, duration_s * 0.5))
+
+
 # --- VocabManager lazy singleton ---
 
 _vocab_manager: VocabManager | None = None
@@ -113,9 +128,10 @@ def transcribe_via_service(audio_data: np.ndarray, sample_rate: int, language: s
     """
     try:
         wav_bytes = encode_wav(audio_data, sample_rate)
+        timeout = cloud_timeout_for(len(audio_data) / sample_rate)
         t0 = time.time()
         result = get_service_client().transcribe(
-            wav_bytes, language=language, project=ACTIVE_PROJECT
+            wav_bytes, language=language, project=ACTIVE_PROJECT, timeout=timeout
         )
         elapsed = time.time() - t0
     except Exception as e:
@@ -158,7 +174,10 @@ def transcribe_via_groq_direct(
             whisper_prompt = hint or None
 
         wav_bytes = encode_wav(audio_data, sample_rate)
-        client = get_groq_client()
+        # Per-request timeout scaled to audio length — see cloud_timeout_for.
+        # with_options returns a shallow copy; the singleton's 30s default
+        # (used by the LLM processing path) is left untouched.
+        client = get_groq_client().with_options(timeout=cloud_timeout_for(len(audio_data) / sample_rate))
         t0 = time.time()
         params: dict = {
             "model": GROQ_TRANSCRIPTION_MODEL,

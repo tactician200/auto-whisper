@@ -53,25 +53,87 @@ OPTIONS = {
     # site-packages, and dlopen can't load shared libraries from inside a zip.
     # sounddevice ships libportaudio.dylib, numpy has C extensions, rumps
     # bridges AppKit through PyObjC, etc. — all go in `packages`.
+    # All runtime deps from `pip list` go here. py2app's autodetection misses
+    # too many transitive deps for the FastAPI+uvicorn+pydantic v2 stack to
+    # rely on (annotated_doc, click, h11, starlette, etc. — each one a
+    # separate rebuild). Listing everything explicitly is verbose but
+    # rebuilds are deterministic. Excluded: pytest, py2app, build tools.
     'packages': [
+        # First-party
         'auto_whisper',
         'auto_whisper_service',
         'shared',
+        # Native binaries (must be in `packages`, not `includes`)
         'sounddevice',
         'numpy',
+        # macOS bindings
         'rumps',
-        'groq',
-        'httpx',
+        'objc',
+        'AppKit',
+        'Foundation',
+        'Quartz',
+        # HTTP / async / FastAPI stack
         'fastapi',
+        'starlette',
         'uvicorn',
+        'h11',
+        'httpcore',
+        'httpx',
+        'httptools',
+        'anyio',
+        'sniffio',
+        'click',
+        # pydantic v2
         'pydantic',
         'pydantic_core',
+        'annotated_doc',
+        'annotated_types',
+        'typing_inspection',
+        'typing_extensions',       # widely needed transitive; safer in packages
+        # LLM / cloud
+        'groq',
         'edge_tts',
+        # google.cloud / google-genai NOT included — only used by
+        # voice_agent._speak_google() which is opt-in (lazy import inside
+        # a function). py2app can't resolve the `google` namespace
+        # cleanly anyway. If we ever want Google Cloud TTS in the bundle,
+        # add `google.cloud.texttospeech` as a package and ship the auth
+        # deps separately.
+        # Network / TLS
+        'cryptography',
+        'cffi',
+        'pycparser',
+        # aiohttp family (used by edge_tts + google_genai)
+        'aiohttp',
+        'aiosignal',
+        'aiohappyeyeballs',
+        'attrs',
+        'frozenlist',
+        'multidict',
+        'propcache',
+        'yarl',
+        # Misc deps that show up in the chain
+        'multipart',               # python-multipart (legacy import name)
+        'python_multipart',        # python-multipart (modern import name; both needed)
+        'dotenv',                  # python-dotenv
+        'tenacity',
+        'requests',
+        'urllib3',
+        'pyasn1',
+        'pyasn1_modules',
+        'yaml',                    # PyYAML
+        'pygments',
     ],
     'includes': [
-        # pure-python deps that don't ship binaries can stay here (smaller
-        # bundle than putting them in `packages`). Add only if py2app misses
-        # them on autodetection.
+        # Pure-python single-file deps fit better as includes (lighter).
+        # NOTE: includes go into python311.zip; if a module has any C
+        # extension or needs __path__ resolution at runtime, move it to
+        # `packages` instead.
+        'idna',
+        'certifi',
+        'charset_normalizer',
+        'distro',
+        'tabulate',
     ],
     'excludes': [
         'meetings_intel',

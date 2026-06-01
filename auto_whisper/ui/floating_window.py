@@ -70,6 +70,27 @@ class _HUDTimerTarget(NSObject):
             hud._tick()
 
 
+class _HUDWakeObserver(NSObject):
+    """Observes NSWorkspace.didWakeNotification — fired when the Mac wakes from
+    sleep. After deep sleep, macOS WindowServer can silently invalidate the
+    registration of NSPanels with NSStatusWindowLevel, so orderFrontRegardless()
+    succeeds in Cocoa but the panel never appears on screen. Mark stale so the
+    next show() tears down + rebuilds."""
+
+    def initWithHUD_(self, hud):
+        self = objc.super(_HUDWakeObserver, self).init()
+        if self is None:
+            return None
+        self._hud_ref = hud
+        return self
+
+    def wake_(self, notification):
+        hud = self._hud_ref
+        if hud is not None:
+            logger.info("[HUD] System woke from sleep — marking panel stale for next show()")
+            hud._panel_stale = True
+
+
 class FloatingHUD:
     def __init__(self):
         self._panel = None
@@ -90,11 +111,76 @@ class FloatingHUD:
         self._dot_tick: int = 0
         self._dot_state: bool = True
         self._opening: bool = False     # True while spring-bounce open animation runs
+        self._preparing: bool = False   # HUD visible but mic stream not yet open (AirPods handshake etc.)
+        self._processing_ui: bool = False  # recording stopped, transcription/LLM in flight — timer frozen, chip shows "PROCESANDO"
+        self._frozen_elapsed: str = "0:00"  # last duration value captured when processing began
+        self._proc_phase: float = 0.0   # indeterminate waveform sweep phase during processing
 
         # Preview state
         self._preview_timer = None      # NSTimer one-shot for 800ms countdown
         self._preview_callback = None   # callable(cancelled: bool)
         self._esc_monitor = None        # NSEvent global monitor ref
+
+        # Wake-from-sleep recovery: NSPanel registrations can be invalidated by
+        # WindowServer after deep sleep, making the panel invisible despite
+        # orderFrontRegardless succeeding. Observer flips this flag on wake;
+        # _show_main() tears down + rebuilds the panel when set.
+        self._panel_stale: bool = False
+        self._wake_observer = None
+        self._register_wake_observer()
+
+        # Idle-rebuild threshold: when the panel sits in orderOut_ longer than
+        # this, certain WindowServer events (Space switches, app activations,
+        # CoreAudio resets) can leave it in a state where orderFrontRegardless
+        # is a silent no-op. Track the last hide moment so _show_main can
+        # decide to rebuild after a long-enough idle gap.
+        self._last_hide_at: float = 0.0
+        self._idle_rebuild_threshold_s: float = 10.0
+
+    def _register_wake_observer(self) -> None:
+        """Subscribe to NSWorkspace.didWakeNotification — fired by macOS when
+        the system wakes from sleep. Standard Apple API; zero impact on
+        sleep/wake behavior."""
+        try:
+            from AppKit import NSWorkspace
+            self._wake_observer = _HUDWakeObserver.alloc().initWithHUD_(self)
+            NSWorkspace.sharedWorkspace().notificationCenter().addObserver_selector_name_object_(
+                self._wake_observer,
+                "wake:",
+                "NSWorkspaceDidWakeNotification",
+                None,
+            )
+            logger.info("[HUD] Wake observer registered")
+        except Exception as exc:
+            logger.warning(f"[HUD] Failed to register wake observer: {exc}")
+
+    def mark_stale(self, reason: str = "external") -> None:
+        """Public hook for external events (e.g. CoreAudio device change) to
+        flag the panel for rebuild on the next show()."""
+        logger.info(f"[HUD] Panel marked stale (reason: {reason})")
+        self._panel_stale = True
+
+    def _teardown_panel(self) -> None:
+        """Discard panel + all subview refs so next show() rebuilds fresh.
+        Used to recover from WindowServer state corruption after sleep/wake."""
+        if self._timer is not None:
+            self._timer.invalidate()
+            self._timer = None
+            self._timer_target = None
+        if self._panel is not None:
+            try:
+                self._panel.orderOut_(None)
+            except Exception:
+                pass
+        self._panel = None
+        self._waveform = None
+        self._mode_chip = None
+        self._privacy_chip = None
+        self._rec_dot = None
+        self._rec_label = None
+        self._duration_label = None
+        self._preview_view = None
+        self._panel_stale = False
 
     def _build_panel(self) -> None:
         """Create and configure the NSPanel. Called once, lazily on first show()."""
@@ -360,6 +446,15 @@ class FloatingHUD:
         )
 
     def _tick(self) -> None:
+        # --- Processing state: timer frozen, waveform shows an indeterminate
+        # "thinking" sweep so the HUD reads as working, not hung. ---
+        if self._processing_ui:
+            if self._waveform is not None:
+                self._proc_phase += 1.0 / 60.0
+                self._waveform.pulse_indeterminate(self._proc_phase)
+            # Duration label stays pinned at _frozen_elapsed — do NOT advance it.
+            return
+
         if self._waveform is not None:
             self._waveform.drain_queue()
 
@@ -368,7 +463,8 @@ class FloatingHUD:
             elapsed = int(time.monotonic() - self._show_time)
             m = elapsed // 60
             s = elapsed % 60
-            self._duration_label.setStringValue_(f"{m}:{s:02d}")
+            self._frozen_elapsed = f"{m}:{s:02d}"
+            self._duration_label.setStringValue_(self._frozen_elapsed)
 
         # Pulse rec dot — sinusoid (breathing) instead of binary blink.
         # Period 1.1s feels alive without being distracting.
@@ -392,6 +488,25 @@ class FloatingHUD:
         self._privacy = privacy
 
         def _show_main():
+            # Idle-rebuild: long pause since last hide → assume the panel may
+            # have lost its WindowServer registration. Mark stale to force
+            # rebuild. Empirically observed at ~20s gap with audio device
+            # change in between.
+            if (
+                self._panel is not None
+                and not self._panel_stale
+                and self._last_hide_at > 0
+                and (time.monotonic() - self._last_hide_at) > self._idle_rebuild_threshold_s
+            ):
+                idle_s = time.monotonic() - self._last_hide_at
+                logger.info(f"[HUD] Idle gap {idle_s:.1f}s since last hide — marking panel stale")
+                self._panel_stale = True
+
+            # Wake-from-sleep / idle / device-change recovery: rebuild panel.
+            if self._panel_stale and self._panel is not None:
+                logger.info("[HUD] Panel stale — rebuilding")
+                self._teardown_panel()
+
             # If privacy state changed since last build, tear down so the
             # layout (chip presence + mode_chip x-offset) gets rebuilt.
             if self._panel is not None and bool(self._privacy_chip) != bool(privacy):
@@ -413,6 +528,8 @@ class FloatingHUD:
 
             # Reset state for new recording session (preview subviews + timers)
             self._reset_preview_state()
+            self._processing_ui = False
+            self._frozen_elapsed = "0:00"
             if self._duration_label is not None:
                 self._duration_label.setStringValue_("0:00")
             if self._waveform is not None:
@@ -421,6 +538,17 @@ class FloatingHUD:
             self._dot_state = True
             self._show_time = time.monotonic()
 
+            # Start in "preparing" state — HUD is visible but the mic stream
+            # may still be opening (AirPods HFP handshake can take 1–3s). The
+            # REC label + dot stay hidden until mark_recording_started() flips
+            # them on, so the user sees the panel arrive immediately but only
+            # the REC indicator when audio is actually being captured.
+            self._preparing = True
+            if self._rec_label is not None:
+                self._rec_label.setHidden_(True)
+            if self._rec_dot is not None:
+                self._rec_dot.setHidden_(True)
+
             # Position offset slightly above the final spot, then animate
             # alpha + an 8px slide-down with ease-out cubic. Gives the HUD a
             # sense of arriving from the menubar rather than blinking in.
@@ -428,7 +556,27 @@ class FloatingHUD:
             final_x, final_y = self._panel.frame().origin.x, self._panel.frame().origin.y
             self._panel.setFrameOrigin_((final_x, final_y + ARRIVAL_SLIDE))
             self._panel.setAlphaValue_(0.0)
+
+            # Diagnostic snapshot — if HUD fails to appear, these logs tell us
+            # whether WindowServer accepted the orderFront (windowNumber > 0,
+            # isVisible True) or silently no-op'd it.
+            try:
+                win_num_before = self._panel.windowNumber()
+                vis_before = self._panel.isVisible()
+            except Exception:
+                win_num_before = -1
+                vis_before = False
             self._panel.orderFrontRegardless()
+            try:
+                win_num_after = self._panel.windowNumber()
+                vis_after = self._panel.isVisible()
+            except Exception:
+                win_num_after = -1
+                vis_after = False
+            logger.info(
+                f"[HUD] orderFront: win#={win_num_before}→{win_num_after} "
+                f"visible={vis_before}→{vis_after} alpha={self._panel.alphaValue():.2f}"
+            )
 
             self._opening = True
             NSAnimationContext.beginGrouping()
@@ -448,9 +596,66 @@ class FloatingHUD:
 
         AppHelper.callAfter(_show_main)
 
+    def mark_recording_started(self) -> None:
+        """Flip from preparing to recording: reveal REC label/dot, reset duration."""
+        def _main():
+            if not self._preparing:
+                return
+            self._preparing = False
+            if self._rec_label is not None:
+                self._rec_label.setHidden_(False)
+            if self._rec_dot is not None:
+                self._rec_dot.setHidden_(False)
+            # Reset elapsed so the duration counter measures actual capture
+            # time, not the HUD-visible-but-mic-still-opening interval.
+            self._show_time = time.monotonic()
+            if self._duration_label is not None:
+                self._duration_label.setStringValue_("0:00")
+        AppHelper.callAfter(_main)
+
+    def mark_processing(self) -> None:
+        """Recording finished, transcription/LLM in flight.
+
+        Freezes the duration timer at its last value, swaps the mode chip to
+        a neutral 'PROCESANDO' label, and hides the red REC indicator. The
+        waveform switches to an indeterminate sweep (driven in _tick) so the
+        HUD reads as actively working rather than stuck.
+        """
+        def _main():
+            self._preparing = False
+            self._processing_ui = True
+            self._proc_phase = 0.0
+            # Pin the duration label at whatever it last showed.
+            if self._duration_label is not None:
+                self._duration_label.setStringValue_(self._frozen_elapsed)
+            # Hide the recording-only cues.
+            if self._rec_dot is not None:
+                self._rec_dot.setHidden_(True)
+            if self._rec_label is not None:
+                self._rec_label.setHidden_(True)
+            # Repurpose the mode chip as the status indicator.
+            if self._mode_chip is not None:
+                self._mode_chip.set_mode("procesando")
+        AppHelper.callAfter(_main)
+
+    def mark_intent(self, label: str) -> None:
+        """Overwrite the processing chip with the detected router intent
+        (e.g. 'TRADUCIR'), so the user sees what the system understood before
+        the result is pasted. Minimal discoverability — no correction chip yet.
+        """
+        def _main():
+            if self._mode_chip is not None:
+                self._mode_chip.set_mode(label)
+        AppHelper.callAfter(_main)
+
     def hide(self, animated: bool = True) -> None:
         """Hide the HUD and stop the timer."""
         def _hide_main():
+            # Record when we entered the hidden state so _show_main can detect
+            # long idle gaps and trigger panel rebuild proactively.
+            self._last_hide_at = time.monotonic()
+            self._processing_ui = False
+
             if self._timer is not None:
                 self._timer.invalidate()
                 self._timer = None

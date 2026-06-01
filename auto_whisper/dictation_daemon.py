@@ -128,6 +128,7 @@ FRAMES_PER_BUFFER = 1024
 RIGHT_CMD_KEYCODE = 54
 LEFT_CMD_KEYCODE = 55
 OPTION_FLAG_MASK = 1 << 19  # NSEventModifierFlagOption
+SHIFT_FLAG_MASK = 1 << 17   # NSEventModifierFlagShift — reserved (currently unused)
 DOUBLE_TAP_WINDOW = 0.4
 V_KEYCODE = 9
 C_KEYCODE = 8
@@ -158,9 +159,9 @@ MODE_CLOUD = "Cloud (Groq)"
 MODE_LOCAL = "Local"
 INPUT_SYSTEM_DEFAULT = "System Default"
 
-RECORDING_MODE_DICTATE = "dictate"
-RECORDING_MODE_ORGANIZE = "organize"
-RECORDING_MODE_OPTIMIZE = "optimize"
+RECORDING_MODE_DICTATE = "dictate"   # R⌘⌘ — raw transcription, no LLM
+RECORDING_MODE_ORGANIZE = "organize" # menu-only explicit organize
+RECORDING_MODE_ROUTE = "route"       # Opt+R⌘⌘ — smart-dictation: voice command → action, else prompt
 
 # Output modes
 OUTPUT_SPEAK = "Speak"
@@ -300,6 +301,111 @@ def capture_selected_text() -> str | None:
                 time.sleep(0.05)
                 board.clearContents()
                 board.setString_forType_(old_content, NSPasteboardTypeString)
+
+
+def read_clipboard_text() -> str | None:
+    """Read the current clipboard text directly (no Cmd+C, no mutation).
+
+    Used by router actions that take a payload (translate/reply) when the
+    dictation is instruction-only — the content to act on lives in the clipboard.
+    """
+    board = NSPasteboard.generalPasteboard()
+    text = board.stringForType_(NSPasteboardTypeString)
+    return text.strip() if text and text.strip() else None
+
+
+# Leading connector after a translate/tone verb, e.g. "a inglés", "al francés",
+# "to english", "en formal". Removed to isolate the content to transform.
+_LEADING_CONNECTOR = re.compile(r"^(?:a|al|en|hacia|to|into)\s+\S+\s*", re.IGNORECASE)
+_LEADING_FILLER = re.compile(
+    r"^(?:esto|eso|lo siguiente|el texto|el mensaje|por favor)\b[\s,:;.\-]*",
+    re.IGNORECASE,
+)
+
+
+def _drop_until_keyword(s: str, keywords, max_lead_words: int = 3) -> str:
+    """Drop everything up to and including the first `keyword` that appears
+    within the first `max_lead_words` words.
+
+    This absorbs any filler between the verb and the language/tone word, in any
+    order — "tradúcelo esto al inglés X" and "tradúcemelo al inglés X" both
+    reduce to "X". The connector/filler regexes miss these because the extra
+    tokens ("esto", "lo", "porfa") aren't a known connector OR filler. The
+    word-position guard avoids eating real content that merely mentions the
+    keyword later ("no me gusta el inglés británico" stays intact).
+    """
+    low = s.lower()
+    best_end = None
+    for kw in keywords:
+        m = re.search(rf"\b{re.escape(kw)}\b", low)
+        if m and len(low[:m.start()].split()) <= max_lead_words:
+            if best_end is None or m.end() < best_end:
+                best_end = m.end()
+    if best_end is not None:
+        return s[best_end:].lstrip(" ,:;.-¿?¡!")
+    return s
+
+
+def _strip_leading_instruction(text: str, action) -> str:
+    """Best-effort: drop the canonical verb + the instruction prefix from the
+    phrase start, leaving the content the user wants transformed.
+
+    "traduce a inglés tengo una reunión"   → "tengo una reunión"
+    "tradúcelo esto al inglés tengo prisa"  → "tengo prisa"
+    "ponlo más formal oye dame eso"         → "oye dame eso"
+    Heuristic, not a parser — when in doubt it leaves text intact.
+    """
+    if not text or action is None:
+        return (text or "").strip()
+    s = text.strip()
+    low = s.lower()
+    for verb in sorted(action.canonical_verbs, key=len, reverse=True):
+        if low.startswith(verb):
+            s = s[len(verb):]
+            break
+    s = s.lstrip(" ,:;.-¿?¡!")
+    # Primary, robust cut: the instruction ends at the language word (translate)
+    # or the tone word (tone). Dropping up to it absorbs intervening filler.
+    aid = getattr(action, "id", None)
+    if aid == "translate":
+        from shared.intent_router import _LANG_MAP
+        s = _drop_until_keyword(s, _LANG_MAP.keys())
+    elif aid == "tone":
+        from shared.intent_router import _TONES
+        s = _drop_until_keyword(s, _TONES)
+    elif aid == "prompt_coding":
+        # "arma un prompt para hacer X" → verb leaves "para hacer X"; drop the
+        # trailing connector so the optimizer sees only "hacer X".
+        s = re.sub(r"^(?:para|de|sobre|acerca de|que)\s+", "", s, count=1, flags=re.IGNORECASE)
+    # Fallback cleanup when no keyword matched (e.g. a verb with no language word).
+    s = _LEADING_CONNECTOR.sub("", s, count=1)
+    s = _LEADING_FILLER.sub("", s, count=1)
+    return s.strip()
+
+
+def _resolve_payload(action_id: str, raw_text: str, clipboard: str | None):
+    """Decide what text a router action operates on. Returns (payload, instruction).
+
+    - reply:           payload = clipboard message, instruction = the dictation
+    - translate/tone:  payload = dictation minus the leading instruction; if that
+                       is too short and the action takes a payload, use the
+                       clipboard; otherwise fall back to the raw dictation.
+    Pure function — no I/O — so it's unit-testable; the daemon passes the
+    clipboard in.
+    """
+    import shared.voice_actions as _va
+    action = _va.get(action_id)
+    if action_id == "reply":
+        return (clipboard or "", raw_text)
+    content = _strip_leading_instruction(raw_text, action)
+    if action is not None and action.needs_payload:
+        if len(content.split()) >= 3:
+            return (content, "")
+        if clipboard:
+            return (clipboard, "")
+        return (content or raw_text, "")
+    # tone (no payload): use stripped content when it's substantial, else raw.
+    return (content if len(content.split()) >= 2 else raw_text, "")
 
 
 def _wait_for_frontmost_app(app, timeout: float = 1.0) -> bool:
@@ -833,8 +939,8 @@ class AutoWhisperApp(rumps.App):
         # the smart path.
         self._btn_dictate = rumps.MenuItem("Dictate (raw)")
         self._btn_dictate.set_callback(self._menu_toggle)
-        self._btn_optimize = rumps.MenuItem("Dictate Smart (LLM routes)")
-        self._btn_optimize.set_callback(self._menu_optimize)
+        self._btn_route = rumps.MenuItem("Dictate Smart (Opt+R⌘⌘)")
+        self._btn_route.set_callback(self._menu_route)
         # Kept for internal compatibility (no menu entry, but used as a
         # recording-mode constant; the classifier can still resolve to it).
         self._btn_organize = rumps.MenuItem("")
@@ -905,7 +1011,7 @@ class AutoWhisperApp(rumps.App):
             [rumps.MenuItem("Settings"), [
                 [rumps.MenuItem("Voice modes"), [
                     self._btn_dictate,
-                    self._btn_optimize,
+                    self._btn_route,
                 ]],
                 [rumps.MenuItem("Engine"), [self._mode_cloud, self._mode_local, self._mode_auto]],
                 [rumps.MenuItem("Language"), [self._lang_es, self._lang_en, self._lang_auto]],
@@ -1095,6 +1201,15 @@ class AutoWhisperApp(rumps.App):
 
     def _handle_device_change(self):
         """Called on main thread when CoreAudio reports device add/remove."""
+        # Mark HUD panel stale — empirically, an audio device change followed
+        # by a delayed show (10+s later) sometimes leaves the panel in a
+        # state where orderFrontRegardless silently no-ops. Rebuild on next show.
+        if self._hud is not None:
+            try:
+                self._hud.mark_stale("audio device change")
+            except Exception:
+                pass
+
         old_index = self._input_device_index
         old_label = self._input_device_label
         self._refresh_input_devices()
@@ -1421,9 +1536,9 @@ class AutoWhisperApp(rumps.App):
         logger.info(f"Menu: Summarize clipboard ({'paste' if paste else 'speak'})")
         self._process_selection("summarize", use_hotkey=False, paste_output=paste)
 
-    def _menu_optimize(self, _):
-        logger.info("Menu: Optimize what I say → prompt")
-        self._toggle_recording(RECORDING_MODE_OPTIMIZE)
+    def _menu_route(self, _):
+        logger.info("Menu: Dictate Smart → intent router")
+        self._toggle_recording(RECORDING_MODE_ROUTE)
 
     def _menu_optimize_text(self, _):
         logger.info("Menu: Optimize clipboard text → prompt")
@@ -1661,15 +1776,20 @@ class AutoWhisperApp(rumps.App):
                 kc = event.keyCode()
                 flags = event.modifierFlags()
 
-                # Right ⌘ — recording: dictate (no modifier) / optimize (+Option)
+                # Right ⌘ — recording: dictate (none) / smart-dictation router (+Option)
                 if kc == RIGHT_CMD_KEYCODE:
                     rcmd_down = bool(flags & (1 << 4))
                     if rcmd_down and not self._rcmd_was_down:
                         now = time.time()
                         if now - self._last_rcmd_time < DOUBLE_TAP_WINDOW:
                             option_held = bool(flags & OPTION_FLAG_MASK)
-                            mode = RECORDING_MODE_OPTIMIZE if option_held else RECORDING_MODE_DICTATE
-                            logger.info(f"Double-tap Right ⌘{'+Opt' if option_held else ''} → {mode}")
+                            if option_held:
+                                # Smart-dictation: intent router (replaces legacy
+                                # OPTIMIZE on this hotkey; OPTIMIZE stays on its menu).
+                                mode, tag = RECORDING_MODE_ROUTE, "+Opt"
+                            else:
+                                mode, tag = RECORDING_MODE_DICTATE, ""
+                            logger.info(f"Double-tap Right ⌘{tag} → {mode}")
                             self._toggle_recording(mode)
                             self._last_rcmd_time = 0
                         else:
@@ -1704,7 +1824,7 @@ class AutoWhisperApp(rumps.App):
         self._monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
             NSFlagsChangedMask, handler
         )
-        logger.info("Hotkeys: R⌘⌘=dictate, Opt+R⌘⌘=optimize, L⌘⌘=read, Opt+L⌘⌘=explain")
+        logger.info("Hotkeys: R⌘⌘=dictate, Opt+R⌘⌘=optimize, Shift+R⌘⌘=voice router, L⌘⌘=read, Opt+L⌘⌘=explain")
 
     def _toggle_recording(self, recording_mode: str = RECORDING_MODE_DICTATE):
         with self._recording_lock:
@@ -1754,6 +1874,19 @@ class AutoWhisperApp(rumps.App):
         self._set_ui(self.ICON_STARTING, start_label)
         from PyObjCTools import AppHelper
         AppHelper.callAfter(lambda: setattr(self._btn_dictate, 'title', '■ Stop dictation'))
+        # Show HUD optimistically — Bluetooth mic handshake (AirPods HFP/SCO)
+        # can stall the stream open for 1–3s or time out. Without this, the
+        # HUD only appears after stream.start() succeeds and looks broken on
+        # slow/failed opens. mark_recording_started() flips REC on later.
+        if self._hud is not None:
+            try:
+                from shared.user_profile import is_privacy_mode
+                self._hud.show(
+                    mode=self._recording_mode,
+                    privacy=is_privacy_mode(),
+                )
+            except Exception as exc:
+                print(f"[ui] HUD show failed: {exc}", flush=True)
         target_name = self._target_app.localizedName() if self._target_app else "unknown"
         start_sound = SOUND_START_ORGANIZE if recording_mode == RECORDING_MODE_ORGANIZE else SOUND_START_DICTATE
         # Play the cue immediately so the user gets confirmation even if the
@@ -1810,6 +1943,11 @@ class AutoWhisperApp(rumps.App):
                     self._set_ui(self.ICON_IDLE, self._format_status_line())
                     from PyObjCTools import AppHelper
                     AppHelper.callAfter(lambda: setattr(self._btn_dictate, 'title', 'Dictate'))
+                    if self._hud is not None:
+                        try:
+                            self._hud.hide()
+                        except Exception:
+                            pass
                     return
 
                 # Try to open at target SR; if device rejects it, fall back to native SR
@@ -1840,6 +1978,11 @@ class AutoWhisperApp(rumps.App):
                     self._set_ui(self.ICON_IDLE, self._format_status_line())
                     from PyObjCTools import AppHelper
                     AppHelper.callAfter(lambda: setattr(self._btn_dictate, 'title', 'Dictate'))
+                    if self._hud is not None:
+                        try:
+                            self._hud.hide()
+                        except Exception:
+                            pass
                     return
 
                 self._capture_sample_rate = capture_sr
@@ -1852,19 +1995,20 @@ class AutoWhisperApp(rumps.App):
                 logger.info(f"Recording started ({recording_mode}) at {capture_sr} Hz")
                 if self._hud is not None:
                     try:
-                        from shared.user_profile import is_privacy_mode
-                        self._hud.show(
-                            mode=self._recording_mode,
-                            privacy=is_privacy_mode(),
-                        )
+                        self._hud.mark_recording_started()
                     except Exception as exc:
-                        print(f"[ui] HUD show failed: {exc}", flush=True)
+                        print(f"[ui] HUD mark_recording_started failed: {exc}", flush=True)
             except Exception as e:
                 logger.error(f"Failed to start recording: {e}")
                 self.recording = False
                 self._set_ui(self.ICON_IDLE, "Mic error")
                 from PyObjCTools import AppHelper
                 AppHelper.callAfter(lambda: setattr(self._btn_dictate, 'title', 'Dictate'))
+                if self._hud is not None:
+                    try:
+                        self._hud.hide()
+                    except Exception:
+                        pass
 
         t = threading.Thread(target=record, daemon=True)
         self._record_thread = t
@@ -1926,6 +2070,15 @@ class AutoWhisperApp(rumps.App):
         recording_mode = self._recording_mode
         from PyObjCTools import AppHelper
         AppHelper.callAfter(lambda: setattr(self._btn_dictate, 'title', 'Dictate'))
+
+        # HUD → processing state: freeze the timer, swap chip to "PROCESANDO",
+        # run the indeterminate waveform sweep. Skipped on the empty-audio
+        # early-exit below (HUD just hides).
+        if self._hud is not None:
+            try:
+                self._hud.mark_processing()
+            except Exception as exc:
+                print(f"[ui] HUD mark_processing failed: {exc}", flush=True)
 
         # Detach stream reference immediately — audio callback will see recording=False
         stream = self.stream
@@ -2023,34 +2176,56 @@ class AutoWhisperApp(rumps.App):
                     engine_label_short = "cloud" if "groq" in engine else "local"
                     target_app_snap = self._target_app
 
-                    # Decide the action for this transcript.
-                    # - DICTATE (R⌘⌘):     raw paste, no LLM
-                    # - ORGANIZE (menu):    explicit organize
-                    # - OPTIMIZE (Opt+R⌘⌘): "smart" — classifier picks the path
+                    # Decide the action for this transcript. Two user-facing modes:
+                    # - DICTATE (R⌘⌘):    raw paste, no LLM.
+                    # - ROUTE   (Opt+R⌘⌘): smart-dictation — a voice command routes
+                    #                      to that action; no command → prompt.
+                    # ORGANIZE is a menu-only explicit shortcut.
                     #
-                    # The classifier short-circuits on cheap heuristics so the
-                    # common case (a few words → raw) doesn't pay an LLM round
-                    # trip. Privacy mode is respected downstream — a "prompt"
-                    # classification under privacy will land on raw paste with
-                    # a "Pasted raw (privacy)" status.
+                    # Cheap heuristics short-circuit so the common case (a few
+                    # words → raw) doesn't pay an LLM round trip. Privacy mode is
+                    # respected downstream — a "prompt" classification under
+                    # privacy lands on raw paste with a "Pasted raw (privacy)" status.
+                    route_decision = None  # set only in RECORDING_MODE_ROUTE
                     if recording_mode == RECORDING_MODE_DICTATE:
                         action_id = "raw"
                     elif recording_mode == RECORDING_MODE_ORGANIZE:
                         action_id = "organize"
-                    else:  # RECORDING_MODE_OPTIMIZE — smart auto-route
+                    elif recording_mode == RECORDING_MODE_ROUTE:
+                        # Smart-dictation: a canonical voice command (traduce /
+                        # responde / organiza / tono) routes to that action. With
+                        # NO command the phrase falls through to the prompt
+                        # classifier — preserving the legacy OPTIMIZE behavior, so
+                        # this hotkey still turns a dictated task into a prompt.
+                        # use_llm=False keeps the router itself LLM-free; the
+                        # single classification call lives in classify_intent.
+                        # Privacy mode skips both → raw.
                         from shared.user_profile import is_privacy_mode
                         if is_privacy_mode():
-                            # No network classifier under privacy → fall back
-                            # to raw (matches the LLM-blocked downstream).
                             action_id = "raw"
                         else:
                             try:
-                                from auto_whisper.text_processor import classify_intent
-                                action_id = classify_intent(raw_text)
-                                logger.info("[classifier] %s → %s", recording_mode, action_id)
+                                from auto_whisper.text_processor import route_intent
+                                route_decision = route_intent(raw_text, use_llm=False)
+                                action_id = route_decision.action_id
+                                if action_id == "dictate":
+                                    # No explicit command → smart-dictation default.
+                                    from auto_whisper.text_processor import classify_intent
+                                    action_id = classify_intent(raw_text)
+                                    logger.info("[router] no command → classify → %s", action_id)
+                                else:
+                                    logger.info(
+                                        "[router] %s → %s (%s, params=%s)",
+                                        recording_mode, action_id,
+                                        route_decision.source, route_decision.params,
+                                    )
                             except Exception as e:
-                                logger.warning("Classifier failed: %s; falling back to prompt_coding", e)
+                                logger.warning("Router failed: %s; optimizing as prompt", e)
                                 action_id = "prompt_coding"
+                    else:
+                        # Defensive: unknown mode → raw (legacy OPTIMIZE folded
+                        # into ROUTE; classify_intent now lives inside that path).
+                        action_id = "raw"
 
                     def _execute_action(action_id: str, cancelled: bool = False, category: str | None = None):
                         # Runs on main thread (NSTimer callback). Heavy work
@@ -2069,8 +2244,42 @@ class AutoWhisperApp(rumps.App):
                             llm_actions = (
                                 "organize", "prompt_coding", "prompt_writing",
                                 "research", "decision_making",
+                                "translate", "tone", "summarize", "reply",
                             )
                             privacy_blocked = is_privacy_mode() and action_id in llm_actions
+
+                            # Router actions may take their payload from the
+                            # clipboard when the dictation is instruction-only.
+                            router_payload, router_instruction = raw_text, ""
+                            if action_id in ("translate", "tone", "reply"):
+                                import shared.voice_actions as _va
+                                _act = _va.get(action_id)
+                                clip = read_clipboard_text() if (_act and _act.needs_payload) else None
+                                router_payload, router_instruction = _resolve_payload(
+                                    action_id, raw_text, clip
+                                )
+
+                            # prompt_coding reached by an explicit verb ("arma un
+                            # prompt para …") carries the instruction in raw_text.
+                            # Strip it so the optimizer sees only the content. When
+                            # prompt_coding is the no-command default (classify_intent),
+                            # raw_text is already pure content — leave it untouched.
+                            prompt_text = raw_text
+                            if (action_id == "prompt_coding" and route_decision
+                                    and route_decision.source == "verb_fastpath"):
+                                import shared.voice_actions as _va
+                                prompt_text = (
+                                    _strip_leading_instruction(raw_text, _va.get("prompt_coding"))
+                                    or raw_text
+                                )
+
+                            # F5 — make the fallback-to-dictation visible: the
+                            # router chose NOT to act, that's not a failure.
+                            if recording_mode == RECORDING_MODE_ROUTE and action_id == "raw":
+                                if route_decision and route_decision.source == "fallback":
+                                    status_prefix = "Dictado (no detecté acción)"
+                                else:
+                                    status_prefix = "Dictado"
 
                             if privacy_blocked or (is_privacy_mode() and action_id in llm_actions):
                                 # No local LLM yet; surface this clearly instead of
@@ -2096,7 +2305,7 @@ class AutoWhisperApp(rumps.App):
                                 self._set_ui(self.ICON_PROCESSING, "Optimizing coding prompt...")
                                 try:
                                     from auto_whisper.text_processor import optimize_prompt
-                                    optimized = optimize_prompt(raw_text, emphasis=category)
+                                    optimized = optimize_prompt(prompt_text, emphasis=category)
                                 except Exception as e:
                                     logger.error(f"Prompt optimization failed: {e}")
                                     optimized = None
@@ -2144,6 +2353,79 @@ class AutoWhisperApp(rumps.App):
                                     status_prefix = "Decision brief ready"
                                 else:
                                     logger.warning("Decision returned empty, falling back to raw")
+                            elif action_id == "translate":
+                                self._set_ui(self.ICON_PROCESSING, "Traduciendo...")
+                                lang = (route_decision.params.get("target_lang")
+                                        if route_decision else None) or "English"
+                                try:
+                                    from auto_whisper.text_processor import translate as _translate
+                                    out = _translate(router_payload, target_lang=lang)
+                                except Exception as e:
+                                    logger.error(f"Translate failed: {e}")
+                                    out = None
+                                if out and out.strip():
+                                    output_text = out.strip()
+                                    status_prefix = f"Traducido ({lang})"
+                                else:
+                                    logger.warning("Translate returned empty, falling back to raw")
+                            elif action_id == "tone":
+                                tone = (route_decision.params.get("tone")
+                                        if route_decision else None) or "formal"
+                                self._set_ui(self.ICON_PROCESSING, f"Ajustando tono ({tone})...")
+                                try:
+                                    from auto_whisper.text_processor import adjust_tone
+                                    out = adjust_tone(router_payload, tone=tone)
+                                except Exception as e:
+                                    logger.error(f"Tone adjust failed: {e}")
+                                    out = None
+                                if out and out.strip():
+                                    output_text = out.strip()
+                                    status_prefix = f"Tono ({tone})"
+                                else:
+                                    logger.warning("Tone returned empty, falling back to raw")
+                            elif action_id == "summarize":
+                                self._set_ui(self.ICON_PROCESSING, "Resumiendo...")
+                                try:
+                                    from auto_whisper.text_processor import summarize as _summarize
+                                    out = _summarize(raw_text)
+                                except Exception as e:
+                                    logger.error(f"Summarize failed: {e}")
+                                    out = None
+                                if out and out.strip():
+                                    output_text = out.strip()
+                                    status_prefix = "Resumido"
+                                else:
+                                    logger.warning("Summarize returned empty, falling back to raw")
+                            elif action_id == "reply":
+                                # F4 — REPLY's payload is the clipboard. Guard the
+                                # invisible precondition: if it's empty or doesn't
+                                # look like a message (a URL, a path, one token),
+                                # don't reply to garbage — paste raw and say why.
+                                _pl = router_payload.strip()
+                                _looks_like_msg = bool(_pl) and (
+                                    " " in _pl and not _pl.startswith(("http://", "https://", "/", "www."))
+                                )
+                                if not _pl:
+                                    logger.info("Reply: empty clipboard, pasting raw")
+                                    status_prefix = "Sin mensaje que responder (copia uno primero)"
+                                elif not _looks_like_msg:
+                                    logger.info("Reply: clipboard not message-like (%r), pasting raw", _pl[:40])
+                                    status_prefix = "El portapapeles no parece un mensaje"
+                                else:
+                                    # Show what it's replying to (F4 transparency).
+                                    _preview = _pl[:45] + ("…" if len(_pl) > 45 else "")
+                                    self._set_ui(self.ICON_PROCESSING, f"Respondiendo a: «{_preview}»")
+                                    try:
+                                        from auto_whisper.text_processor import reply_message
+                                        out = reply_message(_pl, instruction=router_instruction)
+                                    except Exception as e:
+                                        logger.error(f"Reply failed: {e}")
+                                        out = None
+                                    if out and out.strip():
+                                        output_text = out.strip()
+                                        status_prefix = "Respuesta"
+                                    else:
+                                        logger.warning("Reply returned empty, falling back to raw")
 
                             self._last_transcription = output_text
                             self._btn_paste_last.set_callback(self._paste_last)
@@ -2194,6 +2476,17 @@ class AutoWhisperApp(rumps.App):
                             _AppHelper2.callAfter(_finish)
 
                         threading.Thread(target=_worker, daemon=True, name="picker-action").start()
+
+                    # Surface the detected intent on the HUD (router mode only)
+                    # before pasting — minimal discoverability (Fase 6).
+                    if recording_mode == RECORDING_MODE_ROUTE and self._hud is not None:
+                        from shared import voice_actions as _va
+                        _act = _va.get(action_id)
+                        _label = _act.label if _act else "DICTAR"
+                        try:
+                            self._hud.mark_intent(_label)
+                        except Exception as exc:
+                            print(f"[ui] HUD intent failed: {exc}", flush=True)
 
                     # No more picker — execute the resolved action directly.
                     # _execute_action handles its own threading and HUD hide.

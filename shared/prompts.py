@@ -10,9 +10,11 @@ remain hardcoded string constants to avoid behavior change.
 See: plans/design-v5.md Fase C, plans/templates-spike/ for target format.
 """
 
-PROMPT_SUMMARIZE = """Resume en 2-3 frases. Sin saludo, sin introducción, sin "el texto dice".
-Solo la esencia — lo que importa, directo.
-Español fluido, apto para escuchar.
+PROMPT_SUMMARIZE = """Resume el siguiente texto en 2-3 frases.
+Sin saludo, sin presentación, sin títulos.
+Captura la esencia: qué pasó o de qué trata, y qué importa.
+Prosa fluida, apta para lectura en voz alta. Mismo idioma que el texto.
+Responde SOLO con el resumen.
 
 TEXTO:
 {text}"""
@@ -37,10 +39,11 @@ TEXTO:
 {text}"""
 
 
-PROMPT_ORGANIZE = """Limpia texto dictado: elimina muletillas, relleno y repeticiones. Mantén significado exacto y orden del hablante.
-
-Formato: prosa continua por defecto. Bullets solo si el contenido es una lista explícita. Numeración solo para secuencias con orden obligatorio.
-Idioma: igual al input (español, inglés, o mezcla). Sin agregar contenido. Solo el resultado.
+PROMPT_ORGANIZE = """Limpia el siguiente texto dictado: elimina muletillas, relleno y repeticiones.
+Preserva el significado exacto y el orden original del texto. No agregues contenido ni ideas nuevas.
+Usa prosa continua. Usa bullets SOLO si el texto original lista elementos explícitamente.
+Mismo idioma que el original.
+Responde SOLO con el texto limpio, sin explicaciones.
 
 TEXTO:
 {text}"""
@@ -126,6 +129,46 @@ Juan, movemos la reunión a las 16:00. Avisame si te complica.
 
 INPUT:
 {text}"""
+
+
+PROMPT_TONE = """Rewrite the text below adjusting ONLY its tone to: {tone}.
+Keep EXACTLY the same language, facts, names, and numbers.
+Do not add greetings or sign-offs unless they already exist in the original.
+Output ONLY the rewritten text — no commentary.
+
+Example of the kind of adjustment to make (target tone = formal):
+Input: "Oye, lo siento pero no puedo ir mañana"
+Output: "Lamentablemente, no me será posible asistir mañana."
+
+TEXT (rewrite this in a {tone} tone):
+{text}"""
+
+
+PROMPT_TRANSLATE = """Translate the text below into {target_lang}.
+Output ONLY the translation — no commentary, no preamble.
+Preserve: formatting, proper nouns, numbers, URLs, code, technical terms verbatim.
+Match the formality level of the original.
+If already in {target_lang}, return it unchanged.
+
+TEXT:
+{text}"""
+
+
+PROMPT_REPLY = """You are drafting a reply to a message. Follow the instruction provided.
+
+<message>
+{payload}
+</message>
+
+<instruction>
+{instruction}
+</instruction>
+
+Rules:
+- Output ONLY the reply, ready to send. No commentary, no subject line.
+- Use the same language as the message unless the instruction specifies otherwise.
+- Match the register and length of the original message.
+- Do not invent facts. Use [placeholder] for any missing detail."""
 
 
 PROMPT_RESEARCH = """You are a research planner. Restructure the user's dictated thoughts into a research brief that can be sent to an AI assistant (Claude, Perplexity, GPT) or to a human researcher.

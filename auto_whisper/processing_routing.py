@@ -123,6 +123,34 @@ def research_brief(text: str) -> str | None:
     return _direct.research_brief(text)
 
 
+# --- Intent-router voice actions (Claude engine) ---
+# Privacy gate blocks them like any network LLM call → caller falls back to raw.
+# Service path packs the extra param inline as a marker; direct path passes kwargs.
+
+def translate(text: str, target_lang: str = "en") -> str | None:
+    if _blocked_by_privacy("translate"):
+        return None
+    if USE_SERVICE_PROCESSING:
+        return _via_service("translate", f"{text}\n\n[[LANG:{target_lang}]]")
+    return _direct.translate(text, target_lang=target_lang)
+
+
+def adjust_tone(text: str, tone: str = "formal") -> str | None:
+    if _blocked_by_privacy("adjust_tone"):
+        return None
+    if USE_SERVICE_PROCESSING:
+        return _via_service("adjust_tone", f"{text}\n\n[[TONE:{tone}]]")
+    return _direct.adjust_tone(text, tone=tone)
+
+
+def reply_message(payload: str, instruction: str = "") -> str | None:
+    if _blocked_by_privacy("reply_message"):
+        return None
+    if USE_SERVICE_PROCESSING:
+        return _via_service("reply_message", f"{payload}\n\n[[INSTR:{instruction}]]")
+    return _direct.reply_message(payload, instruction=instruction)
+
+
 def decision_brief(text: str) -> str | None:
     if _blocked_by_privacy("decision_brief"):
         return None
