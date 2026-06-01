@@ -30,8 +30,11 @@ WHISPER_MODEL = WHISPER_DIR / "models" / "ggml-medium.bin"
 WHISPER_MODEL_SMALL = WHISPER_DIR / "models" / "ggml-small.bin"  # faster, for meetings
 WHISPER_LANGUAGE = "es"
 
-# Gemini
+# Gemini — primary (cheap) engine for the reply voice action; Claude is the
+# quality fallback if Gemini has no key or fails. gemini-2.5-flash = strong
+# social inference at a fraction of Claude's cost.
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_API_KEY_DICTATION = os.environ.get("GEMINI_API_KEY_DICTATION", GEMINI_API_KEY)
 GEMINI_MODEL = "gemini-2.5-flash"
 
 # Groq (cloud transcription) — dual accounts for free tier maximization

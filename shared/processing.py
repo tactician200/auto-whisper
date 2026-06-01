@@ -107,21 +107,76 @@ def _call_claude(
         return None
 
 
-def _call_llm(
+def _call_gemini(
     prompt: str,
-    max_tokens: int = DEFAULT_MAX_COMPLETION_TOKENS,
-    engine: str = "groq",
+    max_tokens: int,
     system: str | None = None,
     temperature: float | None = None,
 ) -> str | None:
-    """Dispatch to the configured engine. Hybrid: most transforms → groq (fast),
-    reply → claude (social inference). Returns None on failure (engine contract).
-    temperature=None lets each engine use its own default."""
+    """Call Gemini (google-genai) — cheap primary engine for reply. Returns
+    trimmed text or None on failure (same contract as the other engines)."""
+    from shared.config import GEMINI_API_KEY_DICTATION, GEMINI_MODEL
+    if not GEMINI_API_KEY_DICTATION:
+        logger.info("No Gemini API key configured")
+        return None
+    try:
+        from shared.gemini_client import get_gemini_client
+        from google.genai import types
+        client = get_gemini_client()
+        cfg = {"max_output_tokens": max_tokens}
+        if system:
+            cfg["system_instruction"] = system
+        if temperature is not None:
+            cfg["temperature"] = temperature
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(**cfg),
+        )
+        text = (response.text or "").strip()
+        logger.info(f"Gemini response ({len(text)} chars): {text[:100]}...")
+        return text or None
+    except Exception as e:
+        logger.error(f"Gemini LLM failed: {e}")
+        return None
+
+
+def _call_one_engine(
+    engine: str, prompt: str, max_tokens: int,
+    system: str | None, temperature: float | None,
+) -> str | None:
+    """Single-engine dispatch. Groq ignores `system` (it has no system role here)."""
     if engine == "claude":
         return _call_claude(prompt, max_tokens, system=system, temperature=temperature)
+    if engine == "gemini":
+        return _call_gemini(prompt, max_tokens, system=system, temperature=temperature)
     if temperature is None:
         return _call_groq(prompt, max_tokens)
     return _call_groq(prompt, max_tokens, temperature=temperature)
+
+
+def _call_llm(
+    prompt: str,
+    max_tokens: int = DEFAULT_MAX_COMPLETION_TOKENS,
+    engine: str | tuple[str, ...] = "groq",
+    system: str | None = None,
+    temperature: float | None = None,
+) -> str | None:
+    """Dispatch to the configured engine(s). Hybrid: simple transforms → groq
+    (fast), reply → gemini-then-claude (cheap primary, quality fallback).
+
+    `engine` may be a single name or an ordered chain — each is tried until one
+    returns non-None. Returns None only if every engine fails (engine contract).
+    temperature=None lets each engine use its own default."""
+    engines = (engine,) if isinstance(engine, str) else tuple(engine)
+    for i, eng in enumerate(engines):
+        out = _call_one_engine(eng, prompt, max_tokens, system, temperature)
+        if out:
+            return out
+        if len(engines) > 1:
+            nxt = engines[i + 1] if i + 1 < len(engines) else "give up"
+            logger.warning("[llm] engine %r returned None → %s", eng, nxt)
+    return None
 
 
 def summarize(text: str) -> str | None:
@@ -390,9 +445,12 @@ def adjust_tone(text: str, tone: str | None = None) -> str | None:
     )
 
 
+REPLY_ENGINE_CHAIN = ("gemini", "claude")  # cheap primary → quality fallback
+
+
 def reply_message(payload: str, instruction: str | None = None) -> str | None:
-    """Draft a reply to `payload` following `instruction`. Engine: Claude (social
-    inference), temp 0.3.
+    """Draft a reply to `payload` following `instruction`. Engine chain: Gemini
+    Flash (cheap, strong social inference) → Claude Haiku (fallback), temp 0.3.
 
     Service wire packs the instruction as a trailing [[INSTR:...]] marker on the
     payload text; direct daemon path passes it as the kwarg."""
@@ -404,7 +462,8 @@ def reply_message(payload: str, instruction: str | None = None) -> str | None:
             instruction=instruction[:MAX_INPUT_CHARS],
             payload=payload[:MAX_INPUT_CHARS],
         ),
-        max_tokens=OPTIMIZE_MAX_COMPLETION_TOKENS, engine="claude", temperature=0.3,
+        max_tokens=OPTIMIZE_MAX_COMPLETION_TOKENS,
+        engine=REPLY_ENGINE_CHAIN, temperature=0.3,
     )
 
 
