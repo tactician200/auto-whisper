@@ -25,8 +25,11 @@ from shared.prompts import (
     PROMPT_EXPLAIN_VOICE,
     PROMPT_OPTIMIZE,
     PROMPT_ORGANIZE,
+    PROMPT_REPLY,
     PROMPT_RESEARCH,
     PROMPT_SUMMARIZE,
+    PROMPT_TONE,
+    PROMPT_TRANSLATE,
     PROMPT_WRITING,
 )
 
@@ -40,7 +43,11 @@ LLM_MODEL = "llama-3.3-70b-versatile"
 LLM_TEMPERATURE = 0.3
 
 
-def _call_groq(prompt: str, max_tokens: int = DEFAULT_MAX_COMPLETION_TOKENS) -> str | None:
+def _call_groq(
+    prompt: str,
+    max_tokens: int = DEFAULT_MAX_COMPLETION_TOKENS,
+    temperature: float = LLM_TEMPERATURE,
+) -> str | None:
     """Call Groq LLM. Returns trimmed text or None on failure."""
     if not GROQ_API_KEY_DICTATION:
         logger.error("No Groq API key configured")
@@ -50,7 +57,7 @@ def _call_groq(prompt: str, max_tokens: int = DEFAULT_MAX_COMPLETION_TOKENS) -> 
         response = client.chat.completions.create(
             model=LLM_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            temperature=LLM_TEMPERATURE,
+            temperature=temperature,
             max_completion_tokens=max_tokens,
         )
         text = response.choices[0].message.content.strip()
@@ -59,6 +66,62 @@ def _call_groq(prompt: str, max_tokens: int = DEFAULT_MAX_COMPLETION_TOKENS) -> 
     except Exception as e:
         logger.error(f"Groq LLM failed: {e}")
         return None
+
+
+def _call_claude(
+    prompt: str,
+    max_tokens: int,
+    system: str | None = None,
+    temperature: float | None = None,
+) -> str | None:
+    """Call Claude (Anthropic) for reasoning-heavy transforms. Returns trimmed
+    text or None on failure — same contract as _call_groq.
+
+    No prompt caching: the system prompts for the voice actions (reply) are well
+    under Haiku 4.5's 4096-token minimum cacheable prefix, so cache_control would
+    be a silent no-op. Revisit if system prompts grow large.
+    """
+    from shared.config import ANTHROPIC_API_KEY_DICTATION, CLAUDE_MODEL
+    if not ANTHROPIC_API_KEY_DICTATION:
+        logger.error("No Anthropic API key configured")
+        return None
+    try:
+        from shared.anthropic_client import get_anthropic_client
+        client = get_anthropic_client()
+        kwargs = {
+            "model": CLAUDE_MODEL,
+            "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if system:
+            kwargs["system"] = system
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        response = client.messages.create(**kwargs)
+        text = next((b.text for b in response.content if b.type == "text"), "")
+        text = text.strip()
+        logger.info(f"Claude response ({len(text)} chars): {text[:100]}...")
+        return text or None
+    except Exception as e:
+        logger.error(f"Claude LLM failed: {e}")
+        return None
+
+
+def _call_llm(
+    prompt: str,
+    max_tokens: int = DEFAULT_MAX_COMPLETION_TOKENS,
+    engine: str = "groq",
+    system: str | None = None,
+    temperature: float | None = None,
+) -> str | None:
+    """Dispatch to the configured engine. Hybrid: most transforms → groq (fast),
+    reply → claude (social inference). Returns None on failure (engine contract).
+    temperature=None lets each engine use its own default."""
+    if engine == "claude":
+        return _call_claude(prompt, max_tokens, system=system, temperature=temperature)
+    if temperature is None:
+        return _call_groq(prompt, max_tokens)
+    return _call_groq(prompt, max_tokens, temperature=temperature)
 
 
 def summarize(text: str) -> str | None:
@@ -287,6 +350,64 @@ def decision_brief(text: str) -> str | None:
     )
 
 
+# --- Intent-router voice actions (hybrid engine: Claude) ---
+#
+# Each takes an extra param (target_lang / tone / instruction). To keep the
+# service /process wire contract fn(text), these accept the param either as a
+# kwarg (direct daemon path) OR extracted from an inline marker in `text`
+# (service path) — the same trick optimize_prompt uses for [[EMPHASIS:key]].
+
+def _extract_marker(text: str, key: str) -> tuple[str, str | None]:
+    """Pull a trailing [[KEY:value]] marker off `text`. Returns (clean_text, value)."""
+    import re
+    m = re.search(rf"\[\[{key}:(.*?)\]\]\s*$", text, re.DOTALL)
+    if m:
+        return text[:m.start()].rstrip(), m.group(1)
+    return text, None
+
+
+# Per-action engine + temperature (research-curated): translation and tone are
+# pattern-matching tasks Groq handles fast; reply needs Claude's social inference.
+def translate(text: str, target_lang: str | None = None) -> str | None:
+    """Translate text into target_lang (default English). Engine: Groq, temp 0."""
+    if target_lang is None:
+        text, target_lang = _extract_marker(text, "LANG")
+    target_lang = target_lang or "English"
+    return _call_llm(
+        PROMPT_TRANSLATE.format(target_lang=target_lang, text=text[:MAX_INPUT_CHARS]),
+        max_tokens=OPTIMIZE_MAX_COMPLETION_TOKENS, engine="groq", temperature=0.0,
+    )
+
+
+def adjust_tone(text: str, tone: str | None = None) -> str | None:
+    """Rewrite text in the requested tone. Engine: Groq (few-shot in prompt), temp 0.3."""
+    if tone is None:
+        text, tone = _extract_marker(text, "TONE")
+    tone = tone or "formal"
+    return _call_llm(
+        PROMPT_TONE.format(tone=tone, text=text[:MAX_INPUT_CHARS]),
+        max_tokens=OPTIMIZE_MAX_COMPLETION_TOKENS, engine="groq", temperature=0.3,
+    )
+
+
+def reply_message(payload: str, instruction: str | None = None) -> str | None:
+    """Draft a reply to `payload` following `instruction`. Engine: Claude (social
+    inference), temp 0.3.
+
+    Service wire packs the instruction as a trailing [[INSTR:...]] marker on the
+    payload text; direct daemon path passes it as the kwarg."""
+    if instruction is None:
+        payload, instruction = _extract_marker(payload, "INSTR")
+    instruction = instruction or ""
+    return _call_llm(
+        PROMPT_REPLY.format(
+            instruction=instruction[:MAX_INPUT_CHARS],
+            payload=payload[:MAX_INPUT_CHARS],
+        ),
+        max_tokens=OPTIMIZE_MAX_COMPLETION_TOKENS, engine="claude", temperature=0.3,
+    )
+
+
 # Mode → callable map. Used by the service /process endpoint and the future
 # routing module to dispatch by mode name. Adding a mode here is the canonical
 # extension point — keep daemon menu wiring in sync separately.
@@ -300,4 +421,8 @@ MODES: dict[str, callable] = {
     "research_brief": research_brief,
     "decision_brief": decision_brief,
     "classify_intent": classify_intent,
+    # Intent-router actions. Params arrive inline via markers on the service path.
+    "translate": translate,
+    "adjust_tone": adjust_tone,
+    "reply_message": reply_message,
 }

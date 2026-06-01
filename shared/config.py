@@ -39,6 +39,12 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")  # legacy fallback
 GROQ_API_KEY_DICTATION = os.environ.get("GROQ_API_KEY_DICTATION", GROQ_API_KEY)
 GROQ_API_KEY_MEETINGS = os.environ.get("GROQ_API_KEY_MEETINGS", GROQ_API_KEY)
 
+# Anthropic (Claude) — reasoning-heavy voice actions in the intent router
+# (tone, translate, reply). Simple transforms stay on Groq.
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+ANTHROPIC_API_KEY_DICTATION = os.environ.get("ANTHROPIC_API_KEY_DICTATION", ANTHROPIC_API_KEY)
+CLAUDE_MODEL = "claude-haiku-4-5"  # fast + cheap; ample for short text transforms
+
 # Audio
 SUPPORTED_FORMATS = {".m4a", ".mp3", ".wav", ".aac", ".webm", ".ogg", ".mp4", ".opus"}
 SAMPLE_RATE = 16000

@@ -211,3 +211,89 @@ def test_text_processor_reexports_constants():
     assert text_processor.MAX_INPUT_CHARS == processing.MAX_INPUT_CHARS
     assert text_processor.LLM_MODEL == processing.LLM_MODEL
     assert text_processor.MODES is processing.MODES
+
+
+# --- Intent-router voice actions (translate / adjust_tone / reply_message) ---
+
+@pytest.mark.parametrize("fn_name", ["translate", "adjust_tone", "reply_message"])
+def test_router_actions_blocked_by_privacy(monkeypatch, fn_name):
+    from auto_whisper import processing_routing
+
+    monkeypatch.setattr(processing_routing, "USE_SERVICE_PROCESSING", False)
+    monkeypatch.setattr("shared.user_profile.is_privacy_mode", lambda: True)
+    # _direct must NOT be called when privacy blocks.
+    monkeypatch.setattr(
+        processing_routing._direct, fn_name,
+        lambda *a, **k: pytest.fail("direct called under privacy"),
+    )
+    assert getattr(processing_routing, fn_name)("x") is None
+
+
+def test_translate_direct_passes_target_lang(monkeypatch):
+    from auto_whisper import processing_routing
+
+    monkeypatch.setattr(processing_routing, "USE_SERVICE_PROCESSING", False)
+    monkeypatch.setattr("shared.user_profile.is_privacy_mode", lambda: False)
+    seen = {}
+    monkeypatch.setattr(
+        processing_routing._direct, "translate",
+        lambda text, target_lang="en": seen.update(text=text, lang=target_lang) or "ok",
+    )
+    assert processing_routing.translate("hola", target_lang="en") == "ok"
+    assert seen == {"text": "hola", "lang": "en"}
+
+
+def test_tone_direct_passes_tone(monkeypatch):
+    from auto_whisper import processing_routing
+
+    monkeypatch.setattr(processing_routing, "USE_SERVICE_PROCESSING", False)
+    monkeypatch.setattr("shared.user_profile.is_privacy_mode", lambda: False)
+    seen = {}
+    monkeypatch.setattr(
+        processing_routing._direct, "adjust_tone",
+        lambda text, tone="formal": seen.update(text=text, tone=tone) or "ok",
+    )
+    processing_routing.adjust_tone("oye dame eso", tone="formal")
+    assert seen == {"text": "oye dame eso", "tone": "formal"}
+
+
+def test_reply_direct_passes_instruction(monkeypatch):
+    from auto_whisper import processing_routing
+
+    monkeypatch.setattr(processing_routing, "USE_SERVICE_PROCESSING", False)
+    monkeypatch.setattr("shared.user_profile.is_privacy_mode", lambda: False)
+    seen = {}
+    monkeypatch.setattr(
+        processing_routing._direct, "reply_message",
+        lambda payload, instruction="": seen.update(p=payload, i=instruction) or "ok",
+    )
+    processing_routing.reply_message("queja del cliente", instruction="cordial y firme")
+    assert seen == {"p": "queja del cliente", "i": "cordial y firme"}
+
+
+def test_translate_service_packs_lang_marker(monkeypatch):
+    from auto_whisper import processing_routing, transcription
+
+    monkeypatch.setattr(processing_routing, "USE_SERVICE_PROCESSING", True)
+    monkeypatch.setattr("shared.user_profile.is_privacy_mode", lambda: False)
+    fake_client = MagicMock()
+    fake_client.process.return_value = {"result": "hello", "mode": "translate", "duration_s": 0.0}
+    monkeypatch.setattr(transcription, "get_service_client", lambda: fake_client)
+
+    assert processing_routing.translate("hola", target_lang="en") == "hello"
+    mode, text = fake_client.process.call_args.args
+    assert mode == "translate"
+    assert text.endswith("[[LANG:en]]") and "hola" in text
+
+
+def test_translate_marker_roundtrip_through_shared(monkeypatch):
+    """The shared.processing.translate must recover target_lang from the marker
+    the dispatcher packs (service-side unpacking)."""
+    import shared.processing as processing
+    captured = {}
+    monkeypatch.setattr(processing, "_call_llm",
+                        lambda prompt, max_tokens, engine="groq", temperature=None:
+                        captured.setdefault("p", prompt) or "x")
+    processing.translate("hola\n\n[[LANG:fr]]")
+    assert "fr" in captured["p"] and "hola" in captured["p"]
+    assert "[[LANG" not in captured["p"]

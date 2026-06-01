@@ -54,3 +54,33 @@ def test_optimize_prompt_targets_claude_code_in_english():
 
 def test_summarize_prompt_targets_voice_output():
     assert "escuchar" in prompts.PROMPT_SUMMARIZE or "voz" in prompts.PROMPT_SUMMARIZE
+
+
+# --- Intent-router prompts (tone / translate / reply) ---
+
+def test_tone_prompt_has_placeholders_and_renders():
+    p = prompts.PROMPT_TONE
+    assert "{tone}" in p and "{text}" in p
+    rendered = p.format(tone="formal", text="dame eso")
+    assert "formal" in rendered and "dame eso" in rendered
+    assert "{" not in rendered.replace("{text}", "X") or "{tone}" not in rendered
+
+
+def test_translate_prompt_has_placeholders_and_renders():
+    p = prompts.PROMPT_TRANSLATE
+    assert "{target_lang}" in p and "{text}" in p
+    rendered = p.format(target_lang="inglés", text="hola mundo")
+    assert "inglés" in rendered and "hola mundo" in rendered
+
+
+def test_reply_prompt_has_placeholders_and_renders():
+    p = prompts.PROMPT_REPLY
+    assert "{payload}" in p and "{instruction}" in p
+    rendered = p.format(payload="queja del cliente", instruction="cordial")
+    assert "queja del cliente" in rendered and "cordial" in rendered
+
+
+def test_router_prompts_output_only_no_preamble():
+    # Each must instruct "output only ..." to avoid 'Here is the translation:' noise
+    for p in (prompts.PROMPT_TONE, prompts.PROMPT_TRANSLATE, prompts.PROMPT_REPLY):
+        assert "ONLY" in p

@@ -638,6 +638,16 @@ class FloatingHUD:
                 self._mode_chip.set_mode("procesando")
         AppHelper.callAfter(_main)
 
+    def mark_intent(self, label: str) -> None:
+        """Overwrite the processing chip with the detected router intent
+        (e.g. 'TRADUCIR'), so the user sees what the system understood before
+        the result is pasted. Minimal discoverability — no correction chip yet.
+        """
+        def _main():
+            if self._mode_chip is not None:
+                self._mode_chip.set_mode(label)
+        AppHelper.callAfter(_main)
+
     def hide(self, animated: bool = True) -> None:
         """Hide the HUD and stop the timer."""
         def _hide_main():

@@ -18,14 +18,17 @@ here unchanged.
 # Public API — daemon-friendly dispatchers (flag-aware).
 from auto_whisper.processing_routing import (  # noqa: F401
     USE_SERVICE_PROCESSING,
+    adjust_tone,
     classify_intent,
     decision_brief,
     explain,
     optimize_prompt,
     optimize_writing,
     organize_ideas,
+    reply_message,
     research_brief,
     summarize,
+    translate,
 )
 
 # Constants — re-exported for any caller that referenced them.
@@ -36,4 +39,10 @@ from shared.processing import (  # noqa: F401
     MAX_INPUT_CHARS,
     MODES,
     OPTIMIZE_MAX_COMPLETION_TOKENS,
+)
+
+# Intent router — runs local (no service path), returns a RouteDecision.
+from shared.intent_router import (  # noqa: F401
+    RouteDecision,
+    route_intent,
 )

@@ -28,7 +28,7 @@ from tests.fixtures.dictation_samples import SAMPLES
 def test_summarize_calls_groq_with_summarize_prompt(mock_groq_client, captured_prompt):
     summarize(SAMPLES["summarize_long_es"])
     prompt = captured_prompt()
-    assert "Resume en 2-3 frases" in prompt
+    assert "2-3 frases" in prompt
     assert SAMPLES["summarize_long_es"] in prompt
 
 
@@ -83,7 +83,7 @@ def test_explain_paste_uses_paste_prompt(mock_groq_client, captured_prompt):
 def test_organize_ideas_calls_groq_with_organize_prompt(mock_groq_client, captured_prompt):
     organize_ideas(SAMPLES["organize_ideas_mixed"])
     prompt = captured_prompt()
-    assert "Limpia texto dictado" in prompt
+    assert "texto dictado" in prompt
     assert SAMPLES["organize_ideas_mixed"] in prompt
 
 

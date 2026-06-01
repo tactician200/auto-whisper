@@ -9,6 +9,9 @@ pyobjc-framework-Cocoa
 pyobjc-framework-Quartz
 pyobjc-framework-ApplicationServices
 
+# Runtime — intent router (Claude engine for reasoning-heavy voice actions)
+anthropic>=0.40
+
 # Runtime — Phase 1+ service infrastructure (not used in v5 Phase 0)
 fastapi>=0.115
 uvicorn[standard]>=0.32
